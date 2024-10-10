@@ -1,0 +1,9 @@
+name: crystal-es
+version: 0.1.0
+
+authors:
+  - Tristan Holl <mail@tristanholl.com>
+
+crystal: '>= 1.14.0'
+
+license: MIT
