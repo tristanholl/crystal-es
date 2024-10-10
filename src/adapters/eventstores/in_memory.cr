@@ -3,6 +3,11 @@ module ES
     class InMemory < ES::EventStore
       @events : Hash(UUID, ES::EventStore::Event) = Hash(UUID, ES::EventStore::Event).new
 
+      # Initializes the database with the necessary schema, table and permissions for the eventstore
+      def setup
+        # Noop
+      end
+
       # Appends an event to the event stream
       def append(event : ES::Event)
         @events[event.header.event_id] = ES::EventStore::Event.new(JSON.parse(event.header.to_json), JSON.parse(event.body.to_json))

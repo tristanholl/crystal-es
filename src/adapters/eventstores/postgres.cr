@@ -7,6 +7,9 @@ module ES
 
       # Initializes the database with the necessary schema, table and permissions for the eventstore
       def setup
+        skip = @db.query_one %(SELECT EXISTS (SELECT FROM pg_tables WHERE  schemaname = 'eventstore' AND tablename  = 'events');), as: Bool
+        return true if skip
+
         m = Array(String).new
         m << %( CREATE SCHEMA IF NOT EXISTS eventstore; )
         m << %( GRANT USAGE ON SCHEMA eventstore TO pg_monitor; )
@@ -22,7 +25,7 @@ module ES
           ); 
         )
 
-        m.each { |s| db.exec s }
+        m.each { |s| @db.exec s }
       end
 
       # Appends an event to the event stream

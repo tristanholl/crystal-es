@@ -6,6 +6,11 @@ require "../src/crystal-es"
 db = DB.open("postgresql://es:es@localhost:33333/eventstore")
 ES::Config.event_store = ES::EventStores::Postgres.new(db)
 es = ES::Config.event_store
+es.setup
+
+db_queue = DB.open("postgresql://es:es@localhost:33333/eventstore")
+qq = ES::Queues::Postgres.new(db)
+qq.setup
 
 class Ev1 < ES::Event
   @@type = "RandomEvent"
@@ -37,6 +42,15 @@ es.append(ev1)
 puts "A ----------------------------------------"
 puts es.fetch_event(ev1.header.event_id)
 puts "B ----------------------------------------"
-puts es.fetch_event(UUID.new("0192771d-6a3a-7481-81d4-b17888ef4249"))
+# puts es.fetch_event(UUID.new("0192771d-6a3a-7481-81d4-b17888ef4249"))
 puts "C ----------------------------------------"
 puts es.fetch_events(ev1.header.aggregate_id)
+
+
+queue : Channel(ES::Queue::Entry)
+queue = qq.listen("eventstore_queue")
+loop do
+  message = queue.receive
+
+  puts message
+end

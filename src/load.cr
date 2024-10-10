@@ -19,6 +19,12 @@ require "./components/event.cr"
 require "./components/projection.cr"
 
 # Infrastructure adapters
+
+## Event stores
 require "./adapters/eventstores/eventstore.cr"
 require "./adapters/eventstores/in_memory.cr"
 require "./adapters/eventstores/postgres.cr"
+
+## Queues
+require "./adapters/queues/queue.cr"
+require "./adapters/queues/postgres.cr"

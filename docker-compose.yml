@@ -1,0 +1,16 @@
+services:
+  database:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+      target: service
+    init: true
+    tty: true
+    ports:
+      - 33333:5432
+    environment:
+      - POSTGRES_USER=es
+      - POSTGRES_PASSWORD=es
+      - POSTGRES_DB=eventstore
+    # volumes:
+    #   - ./data/postgres/data:/var/lib/postgresql/data

@@ -1,6 +1,10 @@
 require "../../spec_helper"
 
 class MyEventStore < ES::EventStore
+  def setup 
+    # Noop
+  end
+
   def append(event : ES::Event)
   end
 
@@ -8,7 +12,7 @@ class MyEventStore < ES::EventStore
     [] of ES::EventStore::Event
   end
 
-  def fetch_event(event_id : UUID) : (ES::EventStore::Event | Nil)
+  def fetch_event(event_id : UUID) : ES::EventStore::Event
     nil
   end
 end
