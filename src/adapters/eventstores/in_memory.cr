@@ -3,17 +3,20 @@ module ES
     class InMemory < ES::EventStore
       @events : Hash(UUID, ES::EventStore::Event) = Hash(UUID, ES::EventStore::Event).new
 
+      # Appends an event to the event stream
       def append(event : ES::Event)
         @events[event.header.event_id] = ES::EventStore::Event.new(JSON.parse(event.header.to_json), JSON.parse(event.body.to_json))
       end
 
-      def fetch_event(event_id : UUID) : (ES::EventStore::Event | Nil)
+      # Returns a single event for a given id
+      def fetch_event(event_id : UUID) : ES::EventStore::Event
         event = @events.fetch(event_id, nil)
         raise ES::Exception::NotFound.new("Event '#{event_id}' not found in eventstore") if event.nil?
 
         ES::EventStore::Event.new(event.header, event.body)
       end
 
+      # Returns the stream of events for a given aggregate
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new
 
