@@ -12,6 +12,9 @@ db_queue = DB.open("postgresql://es:es@localhost:33333/eventstore")
 qq = ES::Queues::Postgres.new(db)
 qq.setup
 
+ES::Config.event_handlers = ES::EventHandlers.new
+eh = ES::Config.event_handlers
+
 class Ev1 < ES::Event
   @@type = "RandomEvent"
   @@handle = "ev1"
@@ -33,24 +36,35 @@ class Ev1 < ES::Event
     )
     @body = Body.new(comment)
   end
+
+  def initialize(@header : ES::Event::Header, body : JSON::Any)
+    # Parse body
+    @body = Body.from_json(body.to_json)
+  end
 end
+eh.register(Ev1)
 
 ev1 = Ev1.new
 
 es.append(ev1)
-
-puts "A ----------------------------------------"
-puts es.fetch_event(ev1.header.event_id)
-puts "B ----------------------------------------"
-# puts es.fetch_event(UUID.new("0192771d-6a3a-7481-81d4-b17888ef4249"))
-puts "C ----------------------------------------"
-puts es.fetch_events(ev1.header.aggregate_id)
-
 
 queue : Channel(ES::Queue::Entry)
 queue = qq.listen("eventstore_queue")
 loop do
   message = queue.receive
 
-  puts message
+  event_id = message.header.event_id
+  es_event = es.fetch_event(event_id)
+
+  h = ES::Event::Header.from_json(es_event.header.to_json)
+  event = ES::Config.event_handlers.event_class(h.event_handle).new(h, es_event.body)
+  
+  # if @eventbus.publish(event)
+  #   @queue.archive(message.msg_id) # delete
+  # else
+  #   @queue.archive(message.msg_id)
+  #   # Log.error { "Invalid processing result for '#{message.header.event_handle}'" }
+  # end
+
+  # Send to event bus
 end

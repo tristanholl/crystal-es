@@ -1,7 +1,7 @@
 require "../../spec_helper"
 
 class MyEventStore < ES::EventStore
-  def setup 
+  def setup
     # Noop
   end
 

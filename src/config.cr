@@ -23,5 +23,15 @@ module ES
       raise "No default event handlers registered" if h.nil?
       h
     end
+
+    def eventbus=(param : ES::EventBus(ES::Command.class | ES::Projection.class))
+      @@eventbus = param
+    end
+
+    def eventbus : ES::EventBus
+      eb = @@eventbus
+      raise "No eventbus registered" if eb.nil?
+      eb
+    end
   end
 end

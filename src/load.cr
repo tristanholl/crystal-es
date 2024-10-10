@@ -9,22 +9,25 @@ require "./config.cr"
 
 # Event sourcing exceptions
 require "./exceptions/error.cr"
+require "./exceptions/conflict.cr"
 require "./exceptions/invalid_state.cr"
 require "./exceptions/not_found.cr"
 
 # Event sourcing components
 require "./components/aggregate.cr"
 require "./components/command.cr"
+require "./components/eventbus.cr"
+require "./components/event_handlers.cr"
 require "./components/event.cr"
 require "./components/projection.cr"
 
 # Infrastructure adapters
 
-## Event stores
+# # Event stores
 require "./adapters/eventstores/eventstore.cr"
 require "./adapters/eventstores/in_memory.cr"
 require "./adapters/eventstores/postgres.cr"
 
-## Queues
+# # Queues
 require "./adapters/queues/queue.cr"
 require "./adapters/queues/postgres.cr"

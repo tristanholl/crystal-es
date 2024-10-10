@@ -17,12 +17,12 @@ module ES
         m << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA eventstore TO pg_monitor; )
         m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA eventstore GRANT SELECT ON TABLES TO pg_monitor; )
         m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA eventstore GRANT SELECT ON SEQUENCES TO pg_monitor; )
-        m << %(   
+        m << %(
           CREATE TABLE "eventstore"."events" (
             "id" SERIAL PRIMARY KEY,
             "header" jsonb NOT NULL,
             "body" jsonb NOT NULL
-          ); 
+          );
         )
 
         m.each { |s| @db.exec s }

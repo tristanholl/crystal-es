@@ -31,7 +31,7 @@ module ES
           CREATE OR REPLACE TRIGGER "queue_event"
             AFTER INSERT
             ON "eventstore"."events"
-          FOR EACH ROW 
+          FOR EACH ROW
               EXECUTE PROCEDURE "eventstore"."queue_event"();
         )
 
