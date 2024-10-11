@@ -36,11 +36,11 @@ class TestDummyEvent < ES::Event
 end
 
 describe ES::Event do
-  it "returns the correct class aggregate" do 
+  it "returns the correct class aggregate" do
     TestDummyEvent.aggregate.should eq("TestDummyAggregate")
   end
 
-  it "returns the correct class handle" do 
+  it "returns the correct class handle" do
     TestDummyEvent.handle.should eq("test.dummy.event")
   end
 
