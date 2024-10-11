@@ -1,3 +1,4 @@
+# TODO: Implement projector
 module ES
   abstract class Projection
     # @projection_db : DB::Database

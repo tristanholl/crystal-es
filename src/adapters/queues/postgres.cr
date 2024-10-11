@@ -1,5 +1,5 @@
 module ES
-  module Queues
+  module QueueAdapters
     class Postgres < ES::Queue
       # Initialize the postgres queue with a database connection
       def initialize(@db : DB::Database)

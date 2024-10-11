@@ -23,12 +23,25 @@ module ES
       def next_version
         @aggregate_version + 1
       end
+
+      # Sets the type of the aggregate
+      def set_type(type : String)
+        @aggregate_type = type
+      end
+
+      # Returns the aggregate version
+      def version : Int32
+        @aggregate_version
+      end
     end
+
+    # Enforce implementation of state getter in child classes
+    abstract def state : State
 
     @@type = "undefined"
     @event_store : ES::EventStore
     # @event_handlers : ES::EventHandlers
-    @strict_versioning = true
+    @reject_unhandled_events = true
 
     # Returns the aggregate type on class level
     def self.type
@@ -40,14 +53,14 @@ module ES
     # - the strict versioning flag
     def initialize(
       @event_store : ES::EventStore = ES::Config.event_store,
-      @strict_versioning = true
+      @reject_unhandled_events = true
     )
     end
 
     # Applying an unspecified event to the aggregate
     def apply(event : ES::Event)
-      if @strict_versioning
-        raise ES::Exception::Framework.new("Event not handled: '#{event.class}' in aggregate '#{event.header.aggregate_type}'")
+      if @reject_unhandled_events
+        raise ES::Exception::InvalidEventStream.new("Event not handled: '#{event.class}' in aggregate '#{event.header.aggregate_type}'")
       else
         @state.increase_version(event.header.aggregate_version)
       end

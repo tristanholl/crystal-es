@@ -1,5 +1,5 @@
 module ES
-  module EventStores
+  module EventStoreAdapters
     class Postgres < ES::EventStore
       # Initialize with a database connection
       def initialize(@db : DB::Database)

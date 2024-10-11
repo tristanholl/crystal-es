@@ -1,35 +1,9 @@
 require "../../spec_helper"
 
-class MyEvent < ES::Event
-  @@handle = "myevent"
-
-  struct Body < ES::Event::Body
-    include JSON::Serializable
-
-    def initialize(@comment)
-    end
-  end
-
-  def initialize(@header : ES::Event::Header, body : JSON::Any)
-    @body = Body.from_json(body.to_json)
-  end
-
-  def initialize
-    @header = Header.new(
-      aggregate_id: UUID.random,
-      aggregate_type: "Test",
-      aggregate_version: 1,
-      command_handler: "test",
-      event_handle: @@handle
-    )
-    @body = Body.new("comment")
-  end
-end
-
-describe ES::EventStores::InMemory do
+describe ES::EventStoreAdapters::InMemory do
   it "can append, fetch single and all events", tags: "db" do
-    store = ES::EventStores::InMemory.new
-    event = MyEvent.new
+    store = ES::EventStoreAdapters::InMemory.new
+    event = DummyEvent.new
 
     # Append
     store.append(event)

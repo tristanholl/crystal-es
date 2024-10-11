@@ -24,11 +24,11 @@ module ES
       h
     end
 
-    def eventbus=(param : ES::EventBus(ES::Command.class | ES::Projection.class))
+    def event_bus=(param : ES::EventBus(ES::Command.class | ES::Projection.class))
       @@eventbus = param
     end
 
-    def eventbus : ES::EventBus
+    def event_bus : ES::EventBus
       eb = @@eventbus
       raise "No eventbus registered" if eb.nil?
       eb

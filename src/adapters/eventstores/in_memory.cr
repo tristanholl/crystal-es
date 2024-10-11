@@ -1,5 +1,5 @@
 module ES
-  module EventStores
+  module EventStoreAdapters
     class InMemory < ES::EventStore
       @events : Hash(UUID, ES::EventStore::Event) = Hash(UUID, ES::EventStore::Event).new
 
