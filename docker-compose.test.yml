@@ -1,0 +1,7 @@
+services:
+  crystal-es:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: service
