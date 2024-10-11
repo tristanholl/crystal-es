@@ -1,4 +1,4 @@
-name: crystal-es (Tests-Docker)
+name: crystal-es (CI)
 
 on:
   push:
