@@ -2,10 +2,10 @@ module ES
   module QueueAdapters
     class Postgres < ES::Queue
       # Initialize the postgres queue with a database connection
-      def initialize(@db : DB::Database)
+      def initialize(@name : String, @db : DB::Database)
       end
 
-      # Prepares the data for queue usage
+      # Prepares the database for queue usage
       def setup
         skip = @db.query_one %(SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgmq')), as: Bool
         return true if skip
@@ -39,21 +39,24 @@ module ES
       end
 
       # Archives a message from the queue
-      def archive(name : String, msg_id : Int64)
+      def archive(msg_id : Int64)
         @db.query_one %(SELECT * FROM "pgmq"."archive"('#{name}', #{msg_id})), as: {Bool}
       end
 
       # Deletes a message from the queue
-      def delete(name : String, msg_id : Int64)
+      def delete(msg_id : Int64)
         @db.query_one %(SELECT * FROM "pgmq"."delete"('#{name}', #{msg_id})), as: {Bool}
       end
 
       # Reads messages from the queue
-      protected def read(name : String, timeout = 10, count = 1) : Array(ES::Queue::Entry)
+      protected def read(
+        timeout : Time::Span = 10.seconds,
+        count : Int32 = 1
+      ) : Array(ES::Queue::Entry)
         message_array = Array(ES::Queue::Entry).new
 
         prepared_statement = @db.build(%(SELECT msg_id, read_ct, message FROM "pgmq"."read"($1, $2, $3)))
-        prepared_statement.query(name, timeout, count) do |result|
+        prepared_statement.query(@name, timeout.total_seconds, count) do |result|
           result.each do
             message_array << ES::Queue::Entry.new(result.read(Int64), result.read(Int32), result.read(JSON::Any))
           end

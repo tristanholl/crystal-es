@@ -3,6 +3,10 @@ module ES
     class InMemory < ES::EventStore
       @events : Hash(UUID, ES::EventStore::Event) = Hash(UUID, ES::EventStore::Event).new
 
+      # Initialize with an optional queue adapter
+      def initialize(@queue : ES::QueueAdapters::InMemory? = nil)
+      end
+
       # Initializes the database with the necessary schema, table and permissions for the eventstore
       def setup
         # Noop
@@ -11,6 +15,9 @@ module ES
       # Appends an event to the event stream
       def append(event : ES::Event)
         @events[event.header.event_id] = ES::EventStore::Event.new(JSON.parse(event.header.to_json), JSON.parse(event.body.to_json))
+
+        q = @queue
+        q.append(event) unless q.nil?
       end
 
       # Returns a single event for a given id

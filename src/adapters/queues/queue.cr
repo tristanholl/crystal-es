@@ -1,8 +1,8 @@
 module ES
   abstract class Queue
-    abstract def read(name : String) : Array(ES::Queue::Entry)
-    abstract def archive(name : String, msg_id : Int64)
-    abstract def delete(name : String, msg_id : Int64)
+    abstract def read(timeout : Time::Span, count : Int32) : Array(ES::Queue::Entry)
+    abstract def archive(msg_id : Int64)
+    abstract def delete(msg_id : Int64)
     abstract def setup
 
     # Queue entry struct
@@ -22,19 +22,22 @@ module ES
       end
     end
 
+    # Initialize queue with name
+    def initialize(@name : String); end
+
     # TODO: Capacity 1 for non-parallel processing / above for parallel processing
     @channel = Channel(ES::Queue::Entry).new(100)
 
     # Listens for messages in the queue in a background process
-    def listen(name : String, polling_sleep = 1000.milliseconds) : Channel(ES::Queue::Entry)
-      spawn receive_loop(name, polling_sleep)
+    def listen(polling_sleep = 1000.milliseconds, visibility_timeout = 30.seconds) : Channel(ES::Queue::Entry)
+      spawn receive_loop(polling_sleep, visibility_timeout)
       @channel
     end
 
     # Receive loop to read messages from the queue
-    private def receive_loop(name : String, polling_sleep : Time::Span)
+    private def receive_loop(polling_sleep : Time::Span, visibility_timeout : Time::Span)
       loop do
-        read(name: name, timeout: 30, count: 10).each do |m|
+        read(timeout: visibility_timeout, count: 10).each do |m|
           # Push received message to the channel
           @channel.send(m)
         end

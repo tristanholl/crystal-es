@@ -5,19 +5,19 @@ class MyQueue < ES::Queue
     # Noop
   end
 
-  def read(name : String) : Array(ES::Queue::Entry)
+  def read(timeout : Time::Span, count : Int32) : Array(ES::Queue::Entry)
   end
 
-  def archive(name : String, msg_id : Int64)
+  def archive(msg_id : Int64)
   end
 
-  def delete(name : String, msg_id : Int64)
+  def delete(msg_id : Int64)
   end
 end
 
 describe ES::Queue do
   it "allows to instantiate a child class" do
-    store = MyQueue.new
+    store = MyQueue.new("test")
     store.class.should eq(MyQueue)
   end
 end

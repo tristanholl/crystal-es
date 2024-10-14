@@ -31,4 +31,5 @@ require "./adapters/eventstores/postgres.cr"
 
 # # Queues
 require "./adapters/queues/queue.cr"
+require "./adapters/queues/in_memory.cr"
 require "./adapters/queues/postgres.cr"
