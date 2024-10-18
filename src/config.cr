@@ -4,7 +4,6 @@ module ES
 
     class_property version : String = "unknown"
 
-    # TODO: Add Projection class once implemented
     def event_bus=(param : ES::EventBus(ES::Command.class | ES::Projection.class))
       @@eventbus = param
     end
