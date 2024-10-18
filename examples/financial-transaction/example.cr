@@ -46,7 +46,7 @@ bus = ES::Config.event_bus
 bus.subscribe(Events::TransactionAccepted, Projections::Ledger)
 bus.subscribe(Events::TransactionInitiated, [
   Commands::ProcessTransaction,
-  Projections::Ledger
+  Projections::Ledger,
 ])
 bus.subscribe(Events::TransactionRejected, Projections::Ledger)
 
@@ -92,11 +92,11 @@ creditor_account = UUID.new("01929fef-2e55-742f-b151-000000acc100")
 debtor_account = UUID.new("01929fef-2e55-742f-b151-000000acc200")
 
 # Create 1000 transactions
-1.times do |i|
+10.times do |i|
   event = Events::TransactionInitiated.new(
     creditor_account: creditor_account,
     debtor_account: debtor_account,
-    amount: (i+1)*333
+    amount: (i + 1)*333
   )
 
   store.append(event)
