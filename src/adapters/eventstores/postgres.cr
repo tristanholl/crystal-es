@@ -25,8 +25,8 @@ module ES
           );
         )
 
-        m << %( 
-          CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened" 
+        m << %(
+          CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened"
           AS
           SELECT
             e.id,
