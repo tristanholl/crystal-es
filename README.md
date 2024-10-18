@@ -1,6 +1,8 @@
 # crystal-es
 
-TODO: Write a description here
+An event sourcing library for Crystal
+
+[![crystal-es (CI)](https://github.com/tristanholl/crystal-es/actions/workflows/ci.yml/badge.svg)](https://github.com/tristanholl/crystal-es/actions/workflows/ci.yml)
 
 ## Installation
 

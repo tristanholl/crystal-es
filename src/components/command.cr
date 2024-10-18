@@ -2,6 +2,9 @@ module ES
   abstract class Command
     abstract def call
 
+    @aggregate_id : UUID
+    @trigger_event : ES::Event?
+
     # Initialize with a random aggregate ID
     def initialize(
       @event_store : ES::EventStore = ES::Config.event_store,
@@ -18,6 +21,7 @@ module ES
     )
     end
 
+    # Execute command with trigger event parameter
     def call(event : ES::Event)
       @aggregate_id = event.header.aggregate_id
       @trigger_event = event
@@ -25,8 +29,9 @@ module ES
       call
     end
 
+    # Placeholder for subclasses
     def call
-      # TODO: Raise not implemented exception
+      raise ES::Exception::NotImplemented.new("The command class does not properly implement the call() function")
     end
   end
 end

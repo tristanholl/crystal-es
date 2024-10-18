@@ -6,4 +6,8 @@ authors:
 
 crystal: '>= 1.14.0'
 
+dependencies:
+  db:
+    github: crystal-lang/crystal-db
+
 license: MIT

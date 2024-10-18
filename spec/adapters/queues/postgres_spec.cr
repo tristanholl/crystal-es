@@ -1,6 +1,6 @@
 require "../../spec_helper"
 
-describe ES::EventStoreAdapters::Postgres do
+describe ES::QueueAdapters::Postgres do
   pending "pending" do
     false.should eq(true)
   end
