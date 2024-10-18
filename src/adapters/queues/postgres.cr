@@ -12,27 +12,27 @@ module ES
 
         m = Array(String).new
         m << %( CREATE EXTENSION pgmq cascade; )
-        m << %( DROP TRIGGER IF EXISTS "queue_event" ON "eventstore"."events"; )
-        m << %( DROP FUNCTION IF EXISTS "eventstore"."queue_event" CASCADE; )
-        m << %( SELECT FROM "pgmq"."create"('eventstore_queue'); )
+        m << %( DROP TRIGGER IF EXISTS "queue_event_#{@name}" ON "eventstore"."events"; )
+        m << %( DROP FUNCTION IF EXISTS "eventstore"."queue_event_#{@name}" CASCADE; )
+        m << %( SELECT FROM "pgmq"."create"('#{@name}'); )
         m << %(
-          CREATE OR REPLACE FUNCTION "eventstore"."queue_event" ()
-            RETURNS TRIGGER
-            AS $trigger$
-          BEGIN
-            PERFORM "pgmq".send('eventstore_queue', NEW.header);
+CREATE OR REPLACE FUNCTION "eventstore"."queue_event_#{@name}" ()
+  RETURNS TRIGGER
+  AS $trigger$
+BEGIN
+  PERFORM "pgmq".send('#{@name}', NEW.header);
 
-            RETURN NEW;
-          END;
-          $trigger$
-          LANGUAGE plpgsql;
+  RETURN NEW;
+END;
+$trigger$
+LANGUAGE plpgsql;
         )
         m << %(
-          CREATE OR REPLACE TRIGGER "queue_event"
-            AFTER INSERT
-            ON "eventstore"."events"
-          FOR EACH ROW
-              EXECUTE PROCEDURE "eventstore"."queue_event"();
+CREATE OR REPLACE TRIGGER "queue_event_#{@name}"
+  AFTER INSERT
+  ON "eventstore"."events"
+FOR EACH ROW
+    EXECUTE PROCEDURE "eventstore"."queue_event_#{@name}"();
         )
 
         m.each { |s| @db.exec s }
@@ -40,12 +40,12 @@ module ES
 
       # Archives a message from the queue
       def archive(msg_id : Int64)
-        @db.query_one %(SELECT * FROM "pgmq"."archive"('#{name}', #{msg_id})), as: {Bool}
+        @db.query_one %(SELECT * FROM "pgmq"."archive"('#{@name}', #{msg_id})), as: {Bool}
       end
 
       # Deletes a message from the queue
       def delete(msg_id : Int64)
-        @db.query_one %(SELECT * FROM "pgmq"."delete"('#{name}', #{msg_id})), as: {Bool}
+        @db.query_one %(SELECT * FROM "pgmq"."delete"('#{@name}', #{msg_id})), as: {Bool}
       end
 
       # Reads messages from the queue
@@ -56,7 +56,7 @@ module ES
         message_array = Array(ES::Queue::Entry).new
 
         prepared_statement = @db.build(%(SELECT msg_id, read_ct, message FROM "pgmq"."read"($1, $2, $3)))
-        prepared_statement.query(@name, timeout.total_seconds, count) do |result|
+        prepared_statement.query(@name, timeout.total_seconds.to_i, count) do |result|
           result.each do
             message_array << ES::Queue::Entry.new(result.read(Int64), result.read(Int32), result.read(JSON::Any))
           end
