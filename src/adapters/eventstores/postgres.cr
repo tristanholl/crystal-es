@@ -11,18 +11,37 @@ module ES
         return true if skip
 
         m = Array(String).new
-        m << %( CREATE SCHEMA IF NOT EXISTS eventstore; )
-        m << %( GRANT USAGE ON SCHEMA eventstore TO pg_monitor; )
-        m << %( GRANT SELECT ON ALL TABLES IN SCHEMA eventstore TO pg_monitor; )
-        m << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA eventstore TO pg_monitor; )
-        m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA eventstore GRANT SELECT ON TABLES TO pg_monitor; )
-        m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA eventstore GRANT SELECT ON SEQUENCES TO pg_monitor; )
+        m << %( CREATE SCHEMA IF NOT EXISTS "eventstore"; )
+        m << %( GRANT USAGE ON SCHEMA "eventstore" TO pg_monitor; )
+        m << %( GRANT SELECT ON ALL TABLES IN SCHEMA "eventstore" TO pg_monitor; )
+        m << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA "eventstore" TO pg_monitor; )
+        m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON TABLES TO pg_monitor; )
+        m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON SEQUENCES TO pg_monitor; )
         m << %(
           CREATE TABLE "eventstore"."events" (
             "id" SERIAL PRIMARY KEY,
             "header" jsonb NOT NULL,
             "body" jsonb NOT NULL
           );
+        )
+
+        m << %( 
+          CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened" 
+          AS
+          SELECT
+            e.id,
+            e.header ->> 'aggregate_id' AS "aggregate_id",
+            e.header ->> 'event_handle' AS "event_handle",
+            e.header ->> 'aggregate_version' AS "aggregate_version",
+            e.header ->> 'aggregate_type' AS "aggregate_type",
+            e.header,
+            e.body
+          FROM
+            "eventstore"."events" e
+          ORDER BY
+            id ASC,
+            e.header ->> 'aggregate_id' ASC,
+            e.header ->> 'aggregate_version' ASC;
         )
 
         m.each { |s| @db.exec s }
