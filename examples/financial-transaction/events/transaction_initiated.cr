@@ -1,12 +1,12 @@
-class TransactionInitiated < ES::Event
+class Events::TransactionInitiated < ES::Event
   @@aggregate = "Transaction"
   @@handle = "transaction.initiated"
 
   struct Body < ES::Event::Body
     include JSON::Serializable
 
-    getter amount : Int64,
-    getter creditor_account: UUID
+    getter amount : Int64
+    getter creditor_account : UUID
     getter debtor_account : UUID
 
     def initialize(
@@ -36,8 +36,8 @@ class TransactionInitiated < ES::Event
       event_handle: @@handle
     )
     @body = Body.new(
-      amount: amount, 
-      creditor_account: creditor_account, 
+      amount: amount,
+      creditor_account: creditor_account,
       debtor_account: debtor_account
     )
   end
