@@ -22,11 +22,37 @@ An event sourcing library for Crystal
 require "crystal-es"
 ```
 
-TODO: Write usage instructions here
+The library aims to provide a foundation for event sourced applications. It is optimized and tested for the usage of PostgreSQL as event store, queue, as well as projection database. It was extraced out of a bigger project that focused on bringing an open-source core-banking system to life. This is the simplified version of the library used and will be back-ported into it.
+
+The repository provides a simple example in `./examples/financial-transaction` on how to structure a business domain with a financial transaction flow. 
+
+In order to keep bigger projects manageable, I suggest the following (opinionated) structure of domain verticals, which worked quite well:
+
+```
+src/
+- domains/
+  - domain 1/
+    - aggregates/
+      - aggregate.cr
+    - commands/
+      - command_1.cr
+      - command_2.cr
+    - events/
+      - event_1.cr
+      - event_2.cr
+    - migrations/
+      - YYYYMMDDHHmmSS_migration_1.sql
+    - projections/
+      - projection_1.cr
+  - domain 2/
+    - ...
+- shared/
+  - ...
+```
 
 ## Development
 
-TODO: Write development instructions here
+TODO:
 
 ## Contributing
 
