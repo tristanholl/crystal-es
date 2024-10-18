@@ -7,6 +7,7 @@ class Aggregate < ES::Aggregate
     property debtor_account : UUID?
 
     property accepted : Bool = false
+    property rejected : Bool = false
   end
 
   getter state : State
@@ -34,6 +35,15 @@ class Aggregate < ES::Aggregate
 
   # Apply 'Events::TransactionAccepted' to the aggregate state
   def apply(event : Events::TransactionAccepted)
+    @state.increase_version(event.header.aggregate_version)
+
     @state.accepted = true
+  end
+
+  # Apply 'Events::TransactionRejected' to the aggregate state
+  def apply(event : Events::TransactionRejected)
+    @state.increase_version(event.header.aggregate_version)
+
+    @state.rejected = true
   end
 end
