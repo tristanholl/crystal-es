@@ -2,8 +2,8 @@ class Commands::ProcessTransaction < ES::Command
   def call
     # Build the Transaction aggregate
     aggregate = Aggregate.new(
-      @aggregate_id, 
-      event_store: @event_store, 
+      @aggregate_id,
+      event_store: @event_store,
       event_handlers: @event_handlers
     )
     aggregate.hydrate
@@ -19,19 +19,19 @@ class Commands::ProcessTransaction < ES::Command
 
     # Accept the transaction if it has an amount <= 1000
     event = if transaction_amount <= 1000
-      Events::TransactionAccepted.new(
-        aggregate_id: @aggregate_id,
-        aggregate_version: next_version,
-        command_handler: self.class.to_s,
-      )
-    else 
-      Events::TransactionRejected.new(
-        aggregate_id: @aggregate_id,
-        aggregate_version: next_version,
-        command_handler: self.class.to_s,
-        reason: "Amount above threshold of 1000: '#{transaction_amount}'"
-      )
-    end
+              Events::TransactionAccepted.new(
+                aggregate_id: @aggregate_id,
+                aggregate_version: next_version,
+                command_handler: self.class.to_s,
+              )
+            else
+              Events::TransactionRejected.new(
+                aggregate_id: @aggregate_id,
+                aggregate_version: next_version,
+                command_handler: self.class.to_s,
+                reason: "Amount above threshold of 1000: '#{transaction_amount}'"
+              )
+            end
 
     @event_store.append(event)
   end

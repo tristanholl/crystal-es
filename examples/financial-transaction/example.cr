@@ -46,13 +46,14 @@ def process_queue(
 
   loop do
     message = channel.receive
-  
+
     es_event = store.fetch_event(message.header.event_id)
     h = ES::Event::Header.from_json(es_event.header.to_json)
     event = event_handlers.event_class(h.event_handle).new(h, es_event.body)
     event_bus.publish(event)
   end
 end
+
 spawn process_queue(queue, store, event_handlers, bus)
 
 # Parse the for the setup flag

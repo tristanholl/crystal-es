@@ -12,8 +12,8 @@ class Aggregate < ES::Aggregate
   getter state : State
 
   def initialize(
-    aggregate_id : UUID, 
-    @event_store : ES::EventStore, 
+    aggregate_id : UUID,
+    @event_store : ES::EventStore,
     @event_handlers : ES::EventHandlers
   )
     @aggregate_version = 0
