@@ -9,6 +9,7 @@ require "./commands/process_transaction"
 require "./events/transaction_accepted"
 require "./events/transaction_initiated"
 require "./events/transaction_rejected"
+require "./projections/ledger"
 
 # Initializing event handlers
 ES::Config.event_handlers = ES::EventHandlers.new
@@ -28,13 +29,26 @@ store = ES::Config.event_store
 # Initialize queue
 queue = ES::QueueAdapters::Postgres.new("default", db)
 
+# Intialize projection database
+ES::Config.projection_database = db
+projection_database = ES::Config.projection_database
+
+# Initialize projection
+p = Projections::Ledger.new
+p.setup
+
 # Initialize event bus
-ES::Config.event_bus = ES::EventBus(ES::Command.class).new(store, event_handlers)
+ES::Config.event_bus = ES::EventBus(ES::Command.class | ES::Projection.class).new(store, event_handlers)
 # ES::Config.event_bus = ES::EventBus(ES::Command.class | ES::Projection.class).new(store, event_handlers)
 bus = ES::Config.event_bus
 
 # Subscribing command handlers to events
-bus.subscribe(Events::TransactionInitiated, Commands::ProcessTransaction)
+bus.subscribe(Events::TransactionAccepted, Projections::Ledger)
+bus.subscribe(Events::TransactionInitiated, [
+  Commands::ProcessTransaction,
+  Projections::Ledger
+])
+bus.subscribe(Events::TransactionRejected, Projections::Ledger)
 
 def process_queue(
   queue : ES::Queue,
@@ -50,7 +64,10 @@ def process_queue(
     es_event = store.fetch_event(message.header.event_id)
     h = ES::Event::Header.from_json(es_event.header.to_json)
     event = event_handlers.event_class(h.event_handle).new(h, es_event.body)
-    event_bus.publish(event)
+
+    if event_bus.publish(event)
+      queue.archive(message.msg_id)
+    end
   end
 end
 
@@ -71,15 +88,15 @@ OptionParser.parse do |parser|
 end
 
 # The involved accounts are addressed with UUIDs
-creditor_account = UUID.v7
-debtor_account = UUID.v7
+creditor_account = UUID.new("01929fef-2e55-742f-b151-000000acc100")
+debtor_account = UUID.new("01929fef-2e55-742f-b151-000000acc200")
 
 # Create 1000 transactions
-10.times do |i|
+1.times do |i|
   event = Events::TransactionInitiated.new(
     creditor_account: creditor_account,
     debtor_account: debtor_account,
-    amount: i*333
+    amount: (i+1)*333
   )
 
   store.append(event)
