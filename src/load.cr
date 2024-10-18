@@ -10,6 +10,7 @@ require "./config.cr"
 # Event sourcing exceptions
 require "./exceptions/error.cr"
 require "./exceptions/conflict.cr"
+require "./exceptions/dependency_unavailable.cr"
 require "./exceptions/invalid_event_stream.cr"
 require "./exceptions/invalid_state.cr"
 require "./exceptions/not_found.cr"
