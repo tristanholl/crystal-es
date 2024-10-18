@@ -24,7 +24,9 @@ module ES
       h
     end
 
-    def event_bus=(param : ES::EventBus(ES::Command.class | ES::Projection.class))
+    # TODO: Add Projection class once implemented
+    # def event_bus=(param : ES::EventBus(ES::Command.class | ES::Projection.class))
+    def event_bus=(param : ES::EventBus(ES::Command.class))
       @@eventbus = param
     end
 
