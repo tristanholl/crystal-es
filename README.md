@@ -11,7 +11,7 @@ An event sourcing library for Crystal
    ```yaml
    dependencies:
      crystal-es:
-       github: your-github-user/crystal-es
+       github: tristanholl/crystal-es
    ```
 
 2. Run `shards install`
