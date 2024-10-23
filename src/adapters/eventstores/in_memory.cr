@@ -40,7 +40,7 @@ module ES
 
           uuid = UUID.new(es_ev.header["aggregate_id"].to_s)
 
-          event_array << ES::EventStore::Event.new(event_header, event_body) if uuid == aggregate_id
+          event_array << es_ev if uuid == aggregate_id
         end
 
         event_array
