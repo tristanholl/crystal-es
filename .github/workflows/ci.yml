@@ -22,19 +22,16 @@ jobs:
         chmod +x /usr/local/bin/docker-compose
 
     - name: environment info
-      run: make test-info
+      run: make docker-info
 
-    - name: build and start
-      run: make test-up
+    - name: build
+      run: make build
 
-    - name: test setup
-      run: make test-setup
+    - name: run linter
+      run: make lint
 
-    - name: unit-test
-      run: make test-run
-
-    - name: linter
-      run: make test-lint
+    - name: test
+      run: make test
 
     - name: cleanup
-      run: make test-down
+      run: make test-clean
