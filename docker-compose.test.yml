@@ -3,8 +3,6 @@ x-lib: &lib
   image: crystal-es:dev
   env_file:
     - .env-test
-  volumes: &backend_volumes
-    - ./:/crystal-es/lib
 
 services:
   cmd:
