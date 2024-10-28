@@ -1,6 +1,5 @@
 require "db"
 require "spec"
-require "db"
 require "../src/crystal-es"
 
 # Mocking the database for faster testing
@@ -39,6 +38,7 @@ class DummyEvent < ES::Event
 
   def initialize
     @header = Header.new(
+      actor: UUID.v7,
       aggregate_id: UUID.v7,
       aggregate_type: "Test",
       aggregate_version: 1,

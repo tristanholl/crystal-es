@@ -19,10 +19,12 @@ class TestDummyEvent < ES::Event
   def initialize(
     aggregate_id : UUID,
     test : String,
+    actor : UUID? = nil,
     command_handler = "undefined",
     comment = ""
   )
     @header = Header.new(
+      actor: actor,
       aggregate_id: aggregate_id,
       aggregate_type: @@aggregate,
       aggregate_version: 1,
