@@ -1,7 +1,15 @@
+x-lib: &lib
+  platform: linux/amd64
+  image: crystal-es:dev
+  env_file:
+    - .env-dev
+  volumes: &backend_volumes
+    - ./:/crystal-es/lib
+
 services:
-  crystal-es:
-    platform: linux/amd64
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: service
+  cmd:
+    <<: *lib
+    deploy:
+      replicas: 0
+    entrypoint: /bin/bash
+    command: -c
