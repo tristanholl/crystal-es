@@ -1,7 +1,7 @@
 #
 # BASE artifact
 #
-FROM ubuntu:24.04 AS base
+FROM --platform=linux/amd64 ubuntu:24.04 AS base
 
 RUN apt-get update && apt-get install -y curl gnupg2 git
 
@@ -12,14 +12,14 @@ RUN curl -fsSL https://crystal-lang.org/install.sh | bash -s -- --channel=stable
 #
 FROM base AS builder
 
-RUN mkdir -p /lib
-WORKDIR /lib
-COPY ./shard* /lib/
+RUN mkdir -p /crystal-es/lib
+WORKDIR /crystal-es/lib
+COPY ./shard* /crystal-es/lib/
 
 # RUN  crystal -v
 RUN shards install
 
-COPY ./ /lib
+COPY ./ /crystal-es/lib
 
 #
 # SERVICE 
@@ -28,4 +28,4 @@ FROM builder AS service
 
 ENV image_name=crystal-es
 
-WORKDIR /lib
+WORKDIR /crystal-es/lib

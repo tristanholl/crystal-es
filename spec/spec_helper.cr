@@ -1,5 +1,6 @@
 require "db"
 require "spec"
+require "db"
 require "../src/crystal-es"
 
 # Mocking the database for faster testing
