@@ -6,7 +6,7 @@ x-lib: &lib
   env_file:
     - .env-dev
   volumes: &backend_volumes
-    - ./:/
+    - ./:/crystal-es/lib
 
 services:
   cmd:

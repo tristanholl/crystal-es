@@ -123,8 +123,8 @@ env:
 shards:
 	$(call dc-run, "shards install")
 
-# TODO:Setup the database
-# setup-db:
+# TODO: Setup the database
+setup-db:
 # #  $(call dc-run, "")
 
 # Run tests
