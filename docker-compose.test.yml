@@ -2,7 +2,7 @@ x-lib: &lib
   platform: linux/amd64
   image: crystal-es:dev
   env_file:
-    - .env-dev
+    - .env-test
   volumes: &backend_volumes
     - ./:/crystal-es/lib
 
