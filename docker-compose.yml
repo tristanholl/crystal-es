@@ -1,16 +1,40 @@
+x-lib: &lib
+  platform: linux/amd64
+  image: crystal-es:dev
+  depends_on:
+    - database
+  env_file:
+    - .env-dev
+  volumes: &backend_volumes
+    - ./:/
+
 services:
+  cmd:
+    <<: *lib
+    deploy:
+      replicas: 0
+    entrypoint: /bin/bash
+    command: -c
+
+  console:
+    <<: *lib
+    entrypoint: /bin/bash
+    command: ""
+    stdin_open: true
+    tty: true
+
   database:
     build:
       context: .
       dockerfile: Dockerfile.postgres
       target: service
-    init: true
-    tty: true
+    env_file:
+      - .env-dev
+    restart: always
     ports:
-      - 33333:5432
-    environment:
-      - POSTGRES_USER=es
-      - POSTGRES_PASSWORD=es
-      - POSTGRES_DB=eventstore
-    # volumes:
-    #   - ./data/postgres/data:/var/lib/postgresql/data
+      - 5432
+    volumes:
+      - ./storage/postgres/data:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
