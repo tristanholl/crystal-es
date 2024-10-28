@@ -25,9 +25,11 @@ db = DB.open("postgres://es:es@localhost:33333/eventstore?max_pool_size=10")
 # Initialize event store
 ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
 store = ES::Config.event_store
+store.setup
 
 # Initialize queue
 queue = ES::QueueAdapters::Postgres.new("default", db)
+store.setup
 
 # Intialize projection database
 ES::Config.projection_database = db
