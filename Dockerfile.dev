@@ -1,11 +1,7 @@
 #
 # BASE artifact
 #
-FROM --platform=linux/amd64 ubuntu:24.04 AS base
-
-RUN apt-get update && apt-get install -y curl gnupg2 git
-
-RUN curl -fsSL https://crystal-lang.org/install.sh | bash -s -- --channel=stable
+FROM 84codes/crystal:1.14.0-ubuntu-24.04 AS base
 
 #
 # BUILDER artifact

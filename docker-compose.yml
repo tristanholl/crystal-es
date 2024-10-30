@@ -1,5 +1,4 @@
 x-lib: &lib
-  platform: linux/amd64
   image: crystal-es:dev
   depends_on:
     - database
