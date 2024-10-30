@@ -29,15 +29,15 @@ module ES
     @channel = Channel(ES::Queue::Entry).new(100)
 
     # Listens for messages in the queue in a background process
-    def listen(polling_sleep = 1000.milliseconds, visibility_timeout = 30.seconds) : Channel(ES::Queue::Entry)
-      spawn receive_loop(polling_sleep, visibility_timeout)
+    def listen(polling_sleep = 1000.milliseconds, visibility_timeout = 30.seconds, batch_size = 10) : Channel(ES::Queue::Entry)
+      spawn receive_loop(polling_sleep, visibility_timeout, batch_size)
       @channel
     end
 
     # Receive loop to read messages from the queue
-    private def receive_loop(polling_sleep : Time::Span, visibility_timeout : Time::Span)
+    private def receive_loop(polling_sleep : Time::Span, visibility_timeout : Time::Span, batch_size : Int32)
       loop do
-        read(timeout: visibility_timeout, count: 10).each do |m|
+        read(timeout: visibility_timeout, count: batch_size).each do |m|
           # Push received message to the channel
           @channel.send(m)
         end
