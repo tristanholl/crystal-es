@@ -19,12 +19,12 @@ class TestDummyEvent < ES::Event
   def initialize(
     aggregate_id : UUID,
     test : String,
-    actor : UUID? = nil,
+    actor_id : UUID? = nil,
     command_handler = "undefined",
     comment = ""
   )
     @header = Header.new(
-      actor: actor,
+      actor_id: actor_id,
       aggregate_id: aggregate_id,
       aggregate_type: @@aggregate,
       aggregate_version: 1,
@@ -48,12 +48,14 @@ describe ES::Event do
 
   it "creates the event" do
     e = TestDummyEvent.new(
+      actor_id: UUID.new("43ab4533-d06c-4086-bce9-83a7642fb666"),
       aggregate_id: UUID.new("7efe288b-8d33-4359-b799-fd71b32a648e"),
       test: "test",
       comment: "test comment"
     )
 
     h = e.header
+    h.actor_id.should eq(UUID.new("43ab4533-d06c-4086-bce9-83a7642fb666"))
     h.aggregate_id.should eq(UUID.new("7efe288b-8d33-4359-b799-fd71b32a648e"))
     h.aggregate_type.should eq("TestDummyAggregate")
     h.aggregate_version.should eq(1)

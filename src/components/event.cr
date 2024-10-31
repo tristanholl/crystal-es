@@ -7,7 +7,7 @@ module ES
     struct Header
       include JSON::Serializable
 
-      getter actor : UUID? = nil
+      getter actor_id : UUID? = nil
       getter aggregate_id : UUID = UUID.v7
       getter aggregate_type : String = "undefined"
       getter aggregate_version : Int32 = 1
@@ -22,7 +22,7 @@ module ES
       def initialize; end
 
       def initialize(
-        @actor : UUID?,
+        @actor_id : UUID?,
         @aggregate_id : UUID,
         @aggregate_version : Int32,
         @event_handle : String,

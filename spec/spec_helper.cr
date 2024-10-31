@@ -38,7 +38,7 @@ class DummyEvent < ES::Event
 
   def initialize
     @header = Header.new(
-      actor: UUID.v7,
+      actor_id: UUID.v7,
       aggregate_id: UUID.v7,
       aggregate_type: "Test",
       aggregate_version: 1,
