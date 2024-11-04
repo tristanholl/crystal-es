@@ -64,4 +64,4 @@ TODO:
 
 ## Contributors
 
-- [Tristan Holl](https://github.com/your-github-user) - creator and maintainer
+- [Tristan Holl](https://github.com/tristanholl) - creator and maintainer
