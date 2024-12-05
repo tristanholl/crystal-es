@@ -25,6 +25,8 @@ module ES
           );
         )
 
+        m << %(CREATE UNIQUE INDEX aggregate_id_version_idx ON "eventstore"."events"((header->>'aggregate_id'), (header->>'aggregate_version'));)
+
         m << %(
           CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened"
           AS
