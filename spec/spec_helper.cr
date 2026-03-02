@@ -7,7 +7,7 @@ module DBMock
   class Database < DB::Database
     def initialize
       @connection_options = DB::Connection::Options.new
-      @setup_connection = ->(conn : DB::Connection) {}
+      @setup_connection = ->(conn : DB::Connection) { }
       @pool = uninitialized DB::Pool(DB::Connection)
     end
   end
@@ -31,7 +31,7 @@ class DummyEvent < ES::Event
 
   def initialize(
     @header : ES::Event::Header,
-    body : JSON::Any
+    body : JSON::Any,
   )
     @body = Body.from_json(body.to_json)
   end

@@ -30,7 +30,7 @@ module ES
         @created_at = Time.utc,
         @aggregate_type = "undefined",
         @command_handler = "undefined",
-        @command_handler_version = ES::Config.version
+        @command_handler_version = ES::Config.version,
       )
       end
     end

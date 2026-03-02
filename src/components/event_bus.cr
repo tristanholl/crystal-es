@@ -5,7 +5,7 @@ module ES
     # Initializes the event bus with a connection to the event store, as well as the defined event handlers
     def initialize(
       @event_store : ES::EventStore = ES::Config.event_store,
-      @event_handlers : ES::EventHandlers = ES::Config.event_handlers
+      @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
     )
     end
 

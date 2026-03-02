@@ -138,7 +138,7 @@ class Projections::Ledger < ES::Projection
     posting_uuid : UUID,
     transaction_uuid : UUID,
     accepted_at : (Time | Nil) = nil,
-    rejected_at : (Time | Nil) = nil
+    rejected_at : (Time | Nil) = nil,
   )
     creditor_amount_value = amount_value # Amount that is posted on creditor side
     debtor_amount_value = -amount_value  # Amount that is posted on debtor side

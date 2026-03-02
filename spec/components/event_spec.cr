@@ -11,7 +11,7 @@ class TestDummyEvent < ES::Event
 
     def initialize(
       @test : String,
-      @comment : String
+      @comment : String,
     )
     end
   end
@@ -21,7 +21,7 @@ class TestDummyEvent < ES::Event
     test : String,
     actor_id : UUID? = nil,
     command_handler = "undefined",
-    comment = ""
+    comment = "",
   )
     @header = Header.new(
       actor_id: actor_id,

@@ -12,7 +12,7 @@ module ES
       # Initialize Event with header and body
       def initialize(
         @header : JSON::Any,
-        @body : JSON::Any
+        @body : JSON::Any,
       )
       end
     end
