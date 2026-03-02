@@ -8,7 +8,7 @@ module ES
     def initialize(
       @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
       @event_store : ES::EventStore = ES::Config.event_store,
-      @projection_database : DB::Database = ES::Config.projection_database
+      @projection_database : DB::Database = ES::Config.projection_database,
     )
       @event_id = UUID.v7
     end
@@ -17,7 +17,7 @@ module ES
       @event_id : UUID,
       @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
       @event_store : ES::EventStore = ES::Config.event_store,
-      @projection_database : DB::Database = ES::Config.projection_database
+      @projection_database : DB::Database = ES::Config.projection_database,
     )
     end
 

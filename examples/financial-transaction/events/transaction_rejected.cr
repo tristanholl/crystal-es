@@ -12,7 +12,7 @@ class Events::TransactionRejected < ES::Event
 
   def initialize(
     @header : ES::Event::Header,
-    body : JSON::Any
+    body : JSON::Any,
   )
     @body = Body.from_json(body.to_json)
   end
@@ -21,7 +21,7 @@ class Events::TransactionRejected < ES::Event
     aggregate_id : UUID,
     aggregate_version : Int32,
     command_handler : String,
-    reason : String
+    reason : String,
   )
     @header = Header.new(
       aggregate_id: aggregate_id,

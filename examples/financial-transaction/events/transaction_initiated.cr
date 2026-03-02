@@ -12,13 +12,13 @@ class Events::TransactionInitiated < ES::Event
     def initialize(
       @amount : Int64,
       @creditor_account : UUID,
-      @debtor_account : UUID
+      @debtor_account : UUID,
     ); end
   end
 
   def initialize(
     @header : ES::Event::Header,
-    body : JSON::Any
+    body : JSON::Any,
   )
     @body = Body.from_json(body.to_json)
   end
@@ -26,7 +26,7 @@ class Events::TransactionInitiated < ES::Event
   def initialize(
     amount : Int64,
     creditor_account : UUID,
-    debtor_account : UUID
+    debtor_account : UUID,
   )
     @header = Header.new(
       aggregate_id: UUID.v7,

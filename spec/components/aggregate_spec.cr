@@ -11,7 +11,7 @@ class DummyAggregate < ES::Aggregate
   def initialize(
     aggregate_id : UUID,
     @event_store : ES::EventStore,
-    @reject_unhandled_events = true
+    @reject_unhandled_events = true,
   )
     @state = State.new(aggregate_id)
     @state.set_type(@@type)

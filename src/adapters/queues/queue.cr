@@ -16,7 +16,7 @@ module ES
       def initialize(
         @msg_id : Int64,
         @read_ct : Int32,
-        header : JSON::Any
+        header : JSON::Any,
       )
         @header = ES::Event::Header.from_json(header.to_json)
       end

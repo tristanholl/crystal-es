@@ -12,7 +12,7 @@ module ES
         def initialize(
           @message : String?,
           @timestamp : Time,
-          @type : String
+          @type : String,
         )
         end
       end
@@ -26,7 +26,7 @@ module ES
         @print_backtrace = false,
         @status_code : HTTP::Status = HTTP::Status::INTERNAL_SERVER_ERROR,
         timestamp = Time.utc,
-        type = self.class.to_s
+        type = self.class.to_s,
       )
         super(message)
         @info = Information.new(message, timestamp, type)

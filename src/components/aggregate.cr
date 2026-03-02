@@ -50,14 +50,14 @@ module ES
     # - the strict versioning flag
     def initialize(
       @event_store : ES::EventStore = ES::Config.event_store,
-      @reject_unhandled_events = true
+      @reject_unhandled_events = true,
     )
     end
 
     # Handle events up to a certain version
     def apply(
       event : ES::EventStore::Event,
-      up_to_version : Int32
+      up_to_version : Int32,
     )
       h = ES::Event::Header.from_json(event.header.to_json)
       return if h.aggregate_version > up_to_version

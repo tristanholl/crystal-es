@@ -51,7 +51,7 @@ FOR EACH ROW
       # Reads messages from the queue
       protected def read(
         timeout : Time::Span = 10.seconds,
-        count : Int32 = 1
+        count : Int32 = 1,
       ) : Array(ES::Queue::Entry)
         message_array = Array(ES::Queue::Entry).new
 

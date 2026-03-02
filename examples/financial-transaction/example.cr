@@ -56,7 +56,7 @@ def process_queue(
   queue : ES::Queue,
   store : ES::EventStore,
   event_handlers : ES::EventHandlers,
-  event_bus : ES::EventBus
+  event_bus : ES::EventBus,
 )
   channel = queue.listen
 
