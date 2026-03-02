@@ -40,8 +40,6 @@ src/
     - events/
       - event_1.cr
       - event_2.cr
-    - migrations/
-      - YYYYMMDDHHmmSS_migration_1.sql
     - projections/
       - projection_1.cr
   - domain 2/
