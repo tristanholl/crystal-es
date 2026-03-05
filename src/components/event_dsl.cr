@@ -1,6 +1,6 @@
 module ES
   module EventDSL
-    macro attribute(name, type)
+    macro attribute(name, type, default)
       # consumed by `define_event`
     end
 
@@ -31,7 +31,11 @@ module ES
         def initialize(
           @comment : String,
           {% for entry in entries %}
-            @{{ entry.args[0].id }} : {{ entry.args[1] }},
+            {% if entry.args.size == 3 %}
+              @{{ entry.args[0].id }} : {{ entry.args[1] }} = {{ entry.args[2] }},
+            {% else %}
+              @{{ entry.args[0].id }} : {{ entry.args[1] }},
+            {% end %}
           {% end %}
         ); end
       end
@@ -44,7 +48,12 @@ module ES
         actor_id : UUID?,
         command_handler : String,
         {% for entry in entries %}
-          {{ entry.args[0].id }} : {{ entry.args[1] }},
+          {% if entry.args.size == 3 %}
+            {{ entry.args[0].id }} : {{ entry.args[1] }} = {{ entry.args[2] }},
+          {% else %}
+            {{ entry.args[0].id }} : {{ entry.args[1] }},
+          {% end %}
+
         {% end %}
         comment = "",
         aggregate_id = UUID.v7,
