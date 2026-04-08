@@ -44,13 +44,13 @@ module ES
       p
     end
 
-    def projections=(param : ES::Projections)
-      @@projections = param
+    def projection_registry=(param : ES::ProjectionRegistry)
+      @@projection_registry = param
     end
 
-    def projections : ES::Projections
-      h = @@projections
-      raise "No default projections registered" if h.nil?
+    def projection_registry : ES::ProjectionRegistry
+      h = @@projection_registry
+      raise "No default projection registry registered" if h.nil?
       h
     end
   end
