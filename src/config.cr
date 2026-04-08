@@ -43,5 +43,15 @@ module ES
       raise "No default projection database registered" if p.nil?
       p
     end
+
+    def projection_handlers=(param : ES::ProjectionHandlers)
+      @@projection_handlers = param
+    end
+
+    def projection_handlers : ES::ProjectionHandlers
+      h = @@projection_handlers
+      raise "No default projection handlers registered" if h.nil?
+      h
+    end
   end
 end
