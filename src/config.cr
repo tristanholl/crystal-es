@@ -44,13 +44,13 @@ module ES
       p
     end
 
-    def projection_handlers=(param : ES::ProjectionHandlers)
-      @@projection_handlers = param
+    def projections=(param : ES::Projections)
+      @@projections = param
     end
 
-    def projection_handlers : ES::ProjectionHandlers
-      h = @@projection_handlers
-      raise "No default projection handlers registered" if h.nil?
+    def projections : ES::Projections
+      h = @@projections
+      raise "No default projections registered" if h.nil?
       h
     end
   end
