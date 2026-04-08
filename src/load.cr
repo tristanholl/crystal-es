@@ -24,7 +24,7 @@ require "./components/event_dsl.cr"
 require "./components/event_handlers.cr"
 require "./components/event.cr"
 require "./components/projection.cr"
-require "./components/projection_handlers.cr"
+require "./components/projections.cr"
 
 # Infrastructure adapters
 # # Event stores

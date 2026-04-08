@@ -9,15 +9,15 @@ class AnotherProjection < ES::Projection
   @@handle = "another_projection"
 end
 
-describe ES::ProjectionHandlers do
+describe ES::Projections do
   it "registers handle" do
-    ph = ES::ProjectionHandlers.new
+    ph = ES::Projections.new
     ph.register(DummyProjection)
     ph.projection_class("dummy_projection").should eq(DummyProjection)
   end
 
   it "raises Conflict if handle is already registered" do
-    ph = ES::ProjectionHandlers.new
+    ph = ES::Projections.new
     ph.register(DummyProjection)
     expect_raises(ES::Exception::Conflict) do
       ph.register(DummyProjection)
@@ -25,25 +25,25 @@ describe ES::ProjectionHandlers do
   end
 
   it "raises NotFound if handle is not registered" do
-    ph = ES::ProjectionHandlers.new
+    ph = ES::Projections.new
     expect_raises(ES::Exception::NotFound) do
       ph.projection_class("unknown")
     end
   end
 
   it "returns true for registered? when handle is registered" do
-    ph = ES::ProjectionHandlers.new
+    ph = ES::Projections.new
     ph.register(DummyProjection)
     ph.registered?("dummy_projection").should be_true
   end
 
   it "returns false for registered? when handle is not registered" do
-    ph = ES::ProjectionHandlers.new
+    ph = ES::Projections.new
     ph.registered?("unknown").should be_false
   end
 
   it "lists all registered projection handles" do
-    ph = ES::ProjectionHandlers.new
+    ph = ES::Projections.new
     ph.register(DummyProjection)
     ph.register(AnotherProjection)
     ph.all.should contain("dummy_projection")
@@ -52,7 +52,7 @@ describe ES::ProjectionHandlers do
   end
 
   it "returns empty list when no projections are registered" do
-    ph = ES::ProjectionHandlers.new
+    ph = ES::Projections.new
     ph.all.should be_empty
   end
 end

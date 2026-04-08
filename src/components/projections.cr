@@ -1,5 +1,5 @@
 module ES
-  class ProjectionHandlers
+  class Projections
     @projection_handles = Hash(String, ES::Projection.class).new
 
     # Register a new projection
