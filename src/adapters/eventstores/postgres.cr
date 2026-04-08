@@ -66,8 +66,8 @@ module ES
       def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)
         if uid = until_event_id
           exists = @db.query_one?(
-            %(SELECT 1 FROM "eventstore"."events" WHERE header->>'event_id' = $1),
-            uid, as: Int32
+            %(SELECT header->>'event_id' FROM "eventstore"."events" WHERE header->>'event_id' = $1),
+            uid, as: String
           )
           raise ES::Exception::NotFound.new("Event '#{uid}' not found in eventstore") if exists.nil?
         end
