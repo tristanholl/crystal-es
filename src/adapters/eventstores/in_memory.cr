@@ -28,6 +28,18 @@ module ES
         ES::EventStore::Event.new(event.header, event.body)
       end
 
+      # Streams all events in global chronological order (insertion order)
+      def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)
+        if uid = until_event_id
+          raise ES::Exception::NotFound.new("Event '#{uid}' not found in eventstore") unless @events.has_key?(uid)
+        end
+
+        @events.each do |event_id, event|
+          block.call(ES::EventStore::Event.new(event.header, event.body))
+          break if event_id == until_event_id
+        end
+      end
+
       # Returns the stream of events for a given aggregate
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new

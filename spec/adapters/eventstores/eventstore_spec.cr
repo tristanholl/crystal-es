@@ -15,6 +15,9 @@ class MyEventStore < ES::EventStore
   def fetch_event(event_id : UUID) : ES::EventStore::Event
     nil
   end
+
+  def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)
+  end
 end
 
 describe ES::EventStore do
