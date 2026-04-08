@@ -9,51 +9,51 @@ class AnotherProjection < ES::Projection
   @@handle = "another_projection"
 end
 
-describe ES::Projections do
+describe ES::ProjectionRegistry do
   it "registers handle" do
-    ph = ES::Projections.new
-    ph.register(DummyProjection)
-    ph.projection_class("dummy_projection").should eq(DummyProjection)
+    pr = ES::ProjectionRegistry.new
+    pr.register(DummyProjection)
+    pr.projection_class("dummy_projection").should eq(DummyProjection)
   end
 
   it "raises Conflict if handle is already registered" do
-    ph = ES::Projections.new
-    ph.register(DummyProjection)
+    pr = ES::ProjectionRegistry.new
+    pr.register(DummyProjection)
     expect_raises(ES::Exception::Conflict) do
-      ph.register(DummyProjection)
+      pr.register(DummyProjection)
     end
   end
 
   it "raises NotFound if handle is not registered" do
-    ph = ES::Projections.new
+    pr = ES::ProjectionRegistry.new
     expect_raises(ES::Exception::NotFound) do
-      ph.projection_class("unknown")
+      pr.projection_class("unknown")
     end
   end
 
   it "returns true for registered? when handle is registered" do
-    ph = ES::Projections.new
-    ph.register(DummyProjection)
-    ph.registered?("dummy_projection").should be_true
+    pr = ES::ProjectionRegistry.new
+    pr.register(DummyProjection)
+    pr.registered?("dummy_projection").should be_true
   end
 
   it "returns false for registered? when handle is not registered" do
-    ph = ES::Projections.new
-    ph.registered?("unknown").should be_false
+    pr = ES::ProjectionRegistry.new
+    pr.registered?("unknown").should be_false
   end
 
   it "lists all registered projection handles" do
-    ph = ES::Projections.new
-    ph.register(DummyProjection)
-    ph.register(AnotherProjection)
-    ph.all.should contain("dummy_projection")
-    ph.all.should contain("another_projection")
-    ph.all.size.should eq(2)
+    pr = ES::ProjectionRegistry.new
+    pr.register(DummyProjection)
+    pr.register(AnotherProjection)
+    pr.all.should contain("dummy_projection")
+    pr.all.should contain("another_projection")
+    pr.all.size.should eq(2)
   end
 
   it "returns empty list when no projections are registered" do
-    ph = ES::Projections.new
-    ph.all.should be_empty
+    pr = ES::ProjectionRegistry.new
+    pr.all.should be_empty
   end
 end
 
