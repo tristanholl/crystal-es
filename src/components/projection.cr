@@ -39,7 +39,10 @@ module ES
       apply(event)
     end
 
-    def replay(until_event_id : UUID? = nil)
+    def replay(truncate : Bool, until_event_id : UUID? = nil)
+      raise ES::Exception::InvalidState.new("replay requires explicit confirmation: pass truncate: true to truncate the projection table before replaying") unless truncate
+      self.truncate if !self.class.table.empty?
+
       @event_store.each_event(until_event_id: until_event_id) do |es_event|
         handle = es_event.header["event_handle"].as_s
         next unless @event_handlers.registered?(handle)

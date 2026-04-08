@@ -23,7 +23,7 @@ describe ES::Projection do
     store.append(e3)
 
     projection = TestProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-    projection.replay
+    projection.replay(truncate: true)
 
     projection.collected.should eq([e1.header.event_id, e2.header.event_id, e3.header.event_id])
   end
@@ -42,7 +42,7 @@ describe ES::Projection do
     store.append(e3)
 
     projection = TestProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-    projection.replay(until_event_id: e2.header.event_id)
+    projection.replay(truncate: true, until_event_id: e2.header.event_id)
 
     projection.collected.should eq([e1.header.event_id, e2.header.event_id])
   end
@@ -59,7 +59,7 @@ describe ES::Projection do
     store.append(e2)
 
     projection = TestProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-    projection.replay
+    projection.replay(truncate: true)
 
     projection.collected.should be_empty
   end
@@ -71,7 +71,18 @@ describe ES::Projection do
 
     expect_raises(ES::Exception::NotFound) do
       projection = TestProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-      projection.replay(until_event_id: UUID.v7)
+      projection.replay(truncate: true, until_event_id: UUID.v7)
+    end
+  end
+
+  it "replay raises InvalidState when truncate is false" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
+    db = DBMock.open
+
+    expect_raises(ES::Exception::InvalidState) do
+      projection = TestProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
+      projection.replay(truncate: false)
     end
   end
 end
