@@ -59,5 +59,7 @@ module ES
       @header = ES::Event::Header.new
       @body = ES::Event::Body.new
     end
+
+    abstract def initialize(header : ES::Event::Header, body : JSON::Any)
   end
 end
