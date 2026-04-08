@@ -62,6 +62,41 @@ module ES
         raise ES::Exception::NotFound.new("Event '#{event_id}' not found in eventstore")
       end
 
+      # Streams all events in global chronological order via cursor-based pagination
+      def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)
+        if uid = until_event_id
+          exists = @db.query_one?(
+            %(SELECT 1 FROM "eventstore"."events" WHERE header->>'event_id' = $1),
+            uid, as: Int32
+          )
+          raise ES::Exception::NotFound.new("Event '#{uid}' not found in eventstore") if exists.nil?
+        end
+
+        cursor = ""
+        loop do
+          rows = if uid = until_event_id
+            @db.query_all(
+              %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id' > $1 AND header->>'event_id' <= $2 ORDER BY header->>'event_id' ASC LIMIT $3),
+              cursor, uid.to_s, batch_size, as: {JSON::Any, JSON::Any}
+            )
+          else
+            @db.query_all(
+              %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id' > $1 ORDER BY header->>'event_id' ASC LIMIT $2),
+              cursor, batch_size, as: {JSON::Any, JSON::Any}
+            )
+          end
+
+          break if rows.empty?
+
+          rows.each do |header, body|
+            block.call(ES::EventStore::Event.new(header, body))
+            cursor = header["event_id"].as_s
+          end
+
+          break if rows.size < batch_size
+        end
+      end
+
       # Returns the stream of events for a given aggregate
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new

@@ -10,6 +10,11 @@ module ES
       @event_handles[h] = event_class
     end
 
+    # Return whether a handle is registered
+    def registered?(handle : String) : Bool
+      @event_handles.has_key?(handle)
+    end
+
     # Return the class for a given event handle
     def event_class(handle : String) : ES::Event.class
       raise ES::Exception::NotFound.new("handle '#{handle}' not registered") unless @event_handles.has_key?(handle)

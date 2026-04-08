@@ -4,6 +4,7 @@ module ES
     abstract def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
     abstract def fetch_event(event_id : UUID) : ES::EventStore::Event
     abstract def setup
+    abstract def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)
 
     struct Event
       getter header : JSON::Any
