@@ -1,39 +1,10 @@
 require "../spec_helper"
 
 class TestDummyEvent < ES::Event
-  @@aggregate = "TestDummyAggregate"
-  @@handle = "test.dummy.event"
+  include ::ES::EventDSL
 
-  struct Body < ES::Event::Body
-    include JSON::Serializable
-
-    getter test : String
-
-    def initialize(
-      @test : String,
-      @comment : String,
-    )
-    end
-  end
-
-  def initialize(
-    aggregate_id : UUID,
-    test : String,
-    actor_id : UUID? = nil,
-    command_handler = "undefined",
-    comment = "",
-  )
-    @header = Header.new(
-      actor_id: actor_id,
-      aggregate_id: aggregate_id,
-      aggregate_type: @@aggregate,
-      aggregate_version: 1,
-      event_handle: @@handle
-    )
-    @body = Body.new(
-      test: test,
-      comment: comment
-    )
+  define_event "TestDummyAggregate", "test.dummy.event" do
+    attribute :test, String
   end
 end
 
@@ -50,6 +21,7 @@ describe ES::Event do
     e = TestDummyEvent.new(
       actor_id: UUID.new("43ab4533-d06c-4086-bce9-83a7642fb666"),
       aggregate_id: UUID.new("7efe288b-8d33-4359-b799-fd71b32a648e"),
+      command_handler: "Test",
       test: "test",
       comment: "test comment"
     )
@@ -59,7 +31,7 @@ describe ES::Event do
     h.aggregate_id.should eq(UUID.new("7efe288b-8d33-4359-b799-fd71b32a648e"))
     h.aggregate_type.should eq("TestDummyAggregate")
     h.aggregate_version.should eq(1)
-    h.command_handler.should eq("undefined")
+    h.command_handler.should eq("Test")
     h.command_handler_version.should eq(ES::Config.version)
     h.event_handle.should eq("test.dummy.event")
     h.event_id.class.should eq(UUID)
@@ -71,7 +43,9 @@ describe ES::Event do
 
   it "body can be serialized to json" do
     e = TestDummyEvent.new(
+      actor_id: UUID.new("43ab4533-d06c-4086-bce9-83a7642fb666"),
       aggregate_id: UUID.new("7efe288b-8d33-4359-b799-fd71b32a648e"),
+      command_handler: "Test",
       test: "test",
       comment: "test comment"
     )
