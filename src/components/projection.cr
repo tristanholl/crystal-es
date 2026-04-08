@@ -30,6 +30,7 @@ module ES
       @event_store.each_event(until_event_id: until_event_id) do |es_event|
         handle = es_event.header["event_handle"].as_s
         next unless @event_handlers.registered?(handle)
+
         h = ES::Event::Header.from_json(es_event.header.to_json)
         call(@event_handlers.event_class(handle).new(h, es_event.body))
       end
