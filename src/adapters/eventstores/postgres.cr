@@ -75,16 +75,16 @@ module ES
         cursor = ""
         loop do
           rows = if uid = until_event_id
-            @db.query_all(
-              %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id' > $1 AND header->>'event_id' <= $2 ORDER BY header->>'event_id' ASC LIMIT $3),
-              cursor, uid.to_s, batch_size, as: {JSON::Any, JSON::Any}
-            )
-          else
-            @db.query_all(
-              %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id' > $1 ORDER BY header->>'event_id' ASC LIMIT $2),
-              cursor, batch_size, as: {JSON::Any, JSON::Any}
-            )
-          end
+                   @db.query_all(
+                     %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id' > $1 AND header->>'event_id' <= $2 ORDER BY header->>'event_id' ASC LIMIT $3),
+                     cursor, uid.to_s, batch_size, as: {JSON::Any, JSON::Any}
+                   )
+                 else
+                   @db.query_all(
+                     %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id' > $1 ORDER BY header->>'event_id' ASC LIMIT $2),
+                     cursor, batch_size, as: {JSON::Any, JSON::Any}
+                   )
+                 end
 
           break if rows.empty?
 
