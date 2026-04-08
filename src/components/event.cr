@@ -1,6 +1,6 @@
 module ES
   abstract class Event
-    @@aggregate = "AbstractAggregate"
+    @@type = "AbstractAggregate"
     @@handle = "Abstract"
 
     # Default header struct of the event
@@ -47,7 +47,7 @@ module ES
 
     # Returns aggregate the event belongs to
     def self.aggregate
-      @@aggregate
+      @@type
     end
 
     # Returns the event handle
@@ -59,7 +59,5 @@ module ES
       @header = ES::Event::Header.new
       @body = ES::Event::Body.new
     end
-
-    abstract def initialize(header : ES::Event::Header, body : JSON::Any)
   end
 end
