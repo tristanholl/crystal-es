@@ -53,7 +53,7 @@ module ES
     end
 
     # Truncate the projection table and optionally restart the identity sequence
-    def truncate(restart_identity : Bool = true)
+    protected def truncate(restart_identity : Bool = true)
       t = self.class.table
       raise ES::Exception::NotImplemented.new("No table defined for projection '#{self.class.handle}'") if t.empty?
 
