@@ -7,6 +7,10 @@ end
 
 class AnotherProjection < ES::Projection
   @@handle = "another_projection"
+
+  def truncate_proxy
+    self.truncate
+  end
 end
 
 describe ES::ProjectionRegistry do
