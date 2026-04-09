@@ -77,7 +77,7 @@ describe ES::Projection do
 
     projection = AnotherProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
     expect_raises(ES::Exception::NotImplemented) do
-      projection.truncate
+      projection.truncate_proxy
     end
   end
 end
