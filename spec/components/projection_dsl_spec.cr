@@ -4,12 +4,12 @@ class ProjectionDSLTest < ES::Projection
   include ES::ProjectionDSL
 
   define_projection "dsl_test", "test.postings" do
-    column :id,         Int32, serial: true, primary_key: true
-    column :name,       String, null: false
-    column :amount,     Int64, null: false
-    column :comment,    String, null: true
-    column :score,      Float64, null: true
-    column :active,     Bool, null: false, default: true
+    column :id, Int32, serial: true, primary_key: true
+    column :name, String, null: false
+    column :amount, Int64, null: false
+    column :comment, String, null: true
+    column :score, Float64, null: true
+    column :active, Bool, null: false, default: true
     column :created_at, Time, null: false
 
     index [:name], unique: false
