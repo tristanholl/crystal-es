@@ -25,5 +25,4 @@ describe ES::ProjectionDSL do
   it "sets the table" do
     ProjectionDSLTest.table.should eq("test.postings")
   end
-
 end
