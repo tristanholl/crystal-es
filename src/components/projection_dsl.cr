@@ -18,7 +18,7 @@ module ES
       {%
         parts = table.split(".")
         schema_name = parts.size >= 2 ? parts[0] : "public"
-        table_name  = parts.size >= 2 ? parts[1] : parts[0]
+        table_name = parts.size >= 2 ? parts[1] : parts[0]
 
         entries = if block.nil? || block.body.nil?
                     [] of Nil
