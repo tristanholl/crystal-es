@@ -7,8 +7,7 @@ module ES
     end
 
     macro define_projection(handle, table)
-      define_projection({{handle}}, {{table}}) do
-      end
+      {% raise "define_projection requires at least one column declaration; add a block with `column` calls" %}
     end
 
     macro define_projection(handle, table, &block)
