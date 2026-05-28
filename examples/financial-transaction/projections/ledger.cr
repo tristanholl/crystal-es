@@ -4,17 +4,17 @@ class Projections::Ledger < ES::Projection
   TECHNICAL_ACCOUNT = UUID.new("01929fef-2e55-742f-b151-000000acc000")
 
   define_projection "ledger", "projections.postings" do
-    column :id,                  Int32, serial: true, primary_key: true
-    column :posting_uuid,        UUID,  null: false
-    column :transaction_uuid,    UUID,  null: false
-    column :created_at,          Time,  null: false
-    column :account_uuid,        UUID,  null: false
-    column :account_credit_uuid, UUID,  null: false
-    column :account_debit_uuid,  UUID,  null: false
-    column :amount_value,        Int64, null: false
-    column :accepted_at,         Time,  null: true
-    column :aggregate_version,   Int64, null: false
-    column :rejected_at,         Time,  null: true
+    column :id, Int32, serial: true, primary_key: true
+    column :posting_uuid, UUID, null: false
+    column :transaction_uuid, UUID, null: false
+    column :created_at, Time, null: false
+    column :account_uuid, UUID, null: false
+    column :account_credit_uuid, UUID, null: false
+    column :account_debit_uuid, UUID, null: false
+    column :amount_value, Int64, null: false
+    column :accepted_at, Time, null: true
+    column :aggregate_version, Int64, null: false
+    column :rejected_at, Time, null: true
 
     index [:posting_uuid, :account_uuid], unique: true, name: "postings_uuid_account_idx"
   end
