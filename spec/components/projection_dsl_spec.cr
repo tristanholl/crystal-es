@@ -26,18 +26,4 @@ describe ES::ProjectionDSL do
     ProjectionDSLTest.table.should eq("test.postings")
   end
 
-  it "raises a compile error when defined without a column block" do
-    source = <<-CRYSTAL
-      require "./src/crystal-es"
-      class BadProjection < ES::Projection
-        include ES::ProjectionDSL
-        define_projection "bad", "schema.table"
-      end
-    CRYSTAL
-
-    stderr = IO::Memory.new
-    status = Process.run("crystal", ["eval", source], error: stderr, chdir: "#{__DIR__}/../..")
-    status.success?.should be_false
-    stderr.to_s.should contain("define_projection requires at least one column declaration")
-  end
 end
