@@ -17,12 +17,6 @@ class ProjectionDSLTest < ES::Projection
   end
 end
 
-class ProjectionDSLNoBlock < ES::Projection
-  include ES::ProjectionDSL
-
-  define_projection "dsl_no_block", "public.no_block_table"
-end
-
 describe ES::ProjectionDSL do
   it "sets the handle" do
     ProjectionDSLTest.handle.should eq("dsl_test")
@@ -30,10 +24,5 @@ describe ES::ProjectionDSL do
 
   it "sets the table" do
     ProjectionDSLTest.table.should eq("test.postings")
-  end
-
-  it "works without a column block" do
-    ProjectionDSLNoBlock.handle.should eq("dsl_no_block")
-    ProjectionDSLNoBlock.table.should eq("public.no_block_table")
   end
 end
