@@ -1,7 +1,8 @@
-# TODO: Implement projector
 module ES
   abstract class Projection
     @@table = ""
+    @@project_if_empty : Bool = false
+    @@projection_batch_size : Int64 = 1000_i64
 
     @event_handlers : ES::EventHandlers
     @event_store : ES::EventStore
@@ -23,9 +24,16 @@ module ES
     )
     end
 
-    # Returns the projection table name
     def self.table
       @@table
+    end
+
+    def self.project_if_empty? : Bool
+      @@project_if_empty
+    end
+
+    def self.projection_batch_size : Int64
+      @@projection_batch_size
     end
 
     def call(event : ES::Event)
@@ -44,6 +52,29 @@ module ES
         h = ES::Event::Header.from_json(es_event.header.to_json)
         call(@event_handlers.event_class(handle).new(h, es_event.body))
       end
+    end
+
+    # If project_if_empty? is set and the projection table is empty, consume all
+    # events from the store in a background fiber until the projection is up to date.
+    def project_if_empty
+      return unless self.class.project_if_empty?
+      return unless table_empty?
+
+      spawn do
+        @event_store.each_event(batch_size: self.class.projection_batch_size) do |es_event|
+          handle = es_event.header["event_handle"].as_s
+          next unless @event_handlers.registered?(handle)
+
+          h = ES::Event::Header.from_json(es_event.header.to_json)
+          call(@event_handlers.event_class(handle).new(h, es_event.body))
+        end
+      end
+    end
+
+    protected def table_empty? : Bool
+      t = self.class.table
+      return false if t.empty?
+      @projection_database.query_one("SELECT NOT EXISTS (SELECT 1 FROM #{t} LIMIT 1)", as: Bool)
     end
 
     # Truncate the projection table and optionally restart the identity sequence
