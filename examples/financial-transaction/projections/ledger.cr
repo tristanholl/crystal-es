@@ -27,6 +27,7 @@ class Projections::Ledger < ES::Projection
 
   # Events::TransactionInitiated
   def apply(event : Events::TransactionInitiated)
+    # Extract attributes to local variables
     uuid = event.header.event_id
     created_at = event.header.created_at
     aggregate_id = event.header.aggregate_id
@@ -51,20 +52,24 @@ class Projections::Ledger < ES::Projection
 
   # Events::TransactionAccepted
   def apply(event : Events::TransactionAccepted)
+    # Extract attributes to local variables
     uuid = event.header.event_id
     created_at = event.header.created_at
     aggregate_id = event.header.aggregate_id
     aggregate_version = event.header.aggregate_version
 
+    # Build internal transfer aggregate to a specific version
     aggregate = Aggregate.new(aggregate_id)
     aggregate.hydrate(version: aggregate_version)
 
     amount_value = aggregate.state.amount
     creditor_account = aggregate.state.creditor_account
 
+    # Raise exceptions if the aggregate state is invalid. Although very unlikely, this is important, since the projection defines the monetary means of customers
     raise ES::Exception::InvalidState.new("Invalid aggregate state") if amount_value.nil?
     raise ES::Exception::InvalidState.new("Invalid aggregate state") if creditor_account.nil?
 
+    # Insert the postings projection into the projection database
     insert_postings(
       accepted_at: created_at,
       account_credit_uuid: creditor_account,
@@ -79,20 +84,24 @@ class Projections::Ledger < ES::Projection
 
   # Events::TransactionRejected
   def apply(event : Events::TransactionRejected)
+    # Extract attributes to local variables
     uuid = event.header.event_id
     created_at = event.header.created_at
     aggregate_id = event.header.aggregate_id
     aggregate_version = event.header.aggregate_version
 
+    # Build internal transfer aggregate to a specific version
     aggregate = Aggregate.new(aggregate_id)
     aggregate.hydrate(version: aggregate_version)
 
     amount_value = aggregate.state.amount
     debtor_account = aggregate.state.debtor_account
 
+    # Raise exceptions if the aggregate state is invalid. Although very unlikely, this is important, since the projection defines the monetary means of customers
     raise ES::Exception::InvalidState.new("Invalid aggregate state") if amount_value.nil?
     raise ES::Exception::InvalidState.new("Invalid aggregate state") if debtor_account.nil?
 
+    # Insert the postings projection into the projection database
     insert_postings(
       rejected_at: created_at,
       account_credit_uuid: debtor_account,
@@ -130,8 +139,8 @@ class Projections::Ledger < ES::Projection
     accepted_at : (Time | Nil) = nil,
     rejected_at : (Time | Nil) = nil,
   )
-    creditor_amount_value = amount_value
-    debtor_amount_value = -amount_value
+    creditor_amount_value = amount_value # Amount that is posted on creditor side
+    debtor_amount_value = -amount_value  # Amount that is posted on debtor side
 
     @projection_database.transaction do |tx|
       cnn = tx.connection
@@ -155,9 +164,9 @@ class Projections::Ledger < ES::Projection
         accepted_at,
         account_credit_uuid,
         account_debit_uuid,
-        account_credit_uuid,
+        account_credit_uuid, # -amount on creditor account
         aggregate_version,
-        creditor_amount_value,
+        creditor_amount_value, # -amount
         created_at,
         posting_uuid,
         rejected_at,
@@ -168,9 +177,9 @@ class Projections::Ledger < ES::Projection
         accepted_at,
         account_credit_uuid,
         account_debit_uuid,
-        account_debit_uuid,
+        account_debit_uuid, # +amount on debtor account
         aggregate_version,
-        debtor_amount_value,
+        debtor_amount_value, # +amount
         created_at,
         posting_uuid,
         rejected_at,
