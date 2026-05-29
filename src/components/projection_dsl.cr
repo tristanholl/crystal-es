@@ -7,7 +7,7 @@ module ES
     end
 
     macro apply(event_type, &block)
-      protected def apply(event : {{event_type}})
+      def apply(event : {{event_type}})
         header = event.header
         aggregate_id = event.header.aggregate_id
         aggregate_version = event.header.aggregate_version
