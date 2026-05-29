@@ -107,9 +107,11 @@ end
 
 describe "ES::ProjectionDSL apply macro" do
   it "pre-binds header, aggregate_id, aggregate_version, created_at and body" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
     db = DBMock.open
     event = DummyEvent.new
-    projection = TestApplyDSLProjection.new(projection_database: db)
+    projection = TestApplyDSLProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
     projection.call(event)
 
     projection.last_header.should eq(event.header)
