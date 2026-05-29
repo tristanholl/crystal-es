@@ -6,6 +6,17 @@ module ES
     macro index(columns, **options)
     end
 
+    macro apply(event_type, &block)
+      protected def apply(event : {{event_type}})
+        header = event.header
+        aggregate_id = event.header.aggregate_id
+        aggregate_version = event.header.aggregate_version
+        created_at = event.header.created_at
+        body = event.body.as({{event_type}}::Body)
+        {{block.body}}
+      end
+    end
+
     macro define_projection(table)
       {% raise "define_projection requires at least one column declaration; add a block with `column` calls" %}
     end
