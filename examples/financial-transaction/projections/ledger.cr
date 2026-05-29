@@ -3,7 +3,7 @@ class Projections::Ledger < ES::Projection
 
   TECHNICAL_ACCOUNT = UUID.new("01929fef-2e55-742f-b151-000000acc000")
 
-  define_projection "ledger", "projections.postings" do
+  define_projection "projections.postings" do
     column :id, Int32, serial: true, primary_key: true
     column :posting_uuid, UUID, null: false
     column :transaction_uuid, UUID, null: false

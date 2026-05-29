@@ -1,26 +1,23 @@
 require "../spec_helper"
 
 class DummyProjection < ES::Projection
-  @@handle = "dummy_projection"
   @@table = %("projections"."dummy")
 end
 
 class AnotherProjection < ES::Projection
-  @@handle = "another_projection"
-
   def truncate_proxy
     self.truncate
   end
 end
 
 describe ES::ProjectionRegistry do
-  it "registers handle" do
+  it "registers a projection class" do
     pr = ES::ProjectionRegistry.new
     pr.register(DummyProjection)
-    pr.projection_class("dummy_projection").should eq(DummyProjection)
+    pr.registered?(DummyProjection).should be_true
   end
 
-  it "raises Conflict if handle is already registered" do
+  it "raises Conflict if the same class is registered twice" do
     pr = ES::ProjectionRegistry.new
     pr.register(DummyProjection)
     expect_raises(ES::Exception::Conflict) do
@@ -28,30 +25,17 @@ describe ES::ProjectionRegistry do
     end
   end
 
-  it "raises NotFound if handle is not registered" do
+  it "returns false for registered? when class is not registered" do
     pr = ES::ProjectionRegistry.new
-    expect_raises(ES::Exception::NotFound) do
-      pr.projection_class("unknown")
-    end
+    pr.registered?(DummyProjection).should be_false
   end
 
-  it "returns true for registered? when handle is registered" do
-    pr = ES::ProjectionRegistry.new
-    pr.register(DummyProjection)
-    pr.registered?("dummy_projection").should be_true
-  end
-
-  it "returns false for registered? when handle is not registered" do
-    pr = ES::ProjectionRegistry.new
-    pr.registered?("unknown").should be_false
-  end
-
-  it "lists all registered projection handles" do
+  it "lists all registered projection classes" do
     pr = ES::ProjectionRegistry.new
     pr.register(DummyProjection)
     pr.register(AnotherProjection)
-    pr.all.should contain("dummy_projection")
-    pr.all.should contain("another_projection")
+    pr.all.should contain(DummyProjection)
+    pr.all.should contain(AnotherProjection)
     pr.all.size.should eq(2)
   end
 
@@ -62,10 +46,6 @@ describe ES::ProjectionRegistry do
 end
 
 describe ES::Projection do
-  it "exposes handle class method" do
-    DummyProjection.handle.should eq("dummy_projection")
-  end
-
   it "exposes table class method" do
     DummyProjection.table.should eq(%("projections"."dummy"))
   end

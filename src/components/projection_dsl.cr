@@ -6,13 +6,12 @@ module ES
     macro index(columns, **options)
     end
 
-    macro define_projection(handle, table)
+    macro define_projection(table)
       {% raise "define_projection requires at least one column declaration; add a block with `column` calls" %}
     end
 
-    macro define_projection(handle, table, &block)
-      @@handle = {{handle}}
-      @@table  = {{table}}
+    macro define_projection(table, &block)
+      @@table = {{table}}
 
       {%
         parts = table.split(".")
