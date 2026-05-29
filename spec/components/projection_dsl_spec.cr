@@ -3,7 +3,7 @@ require "../spec_helper"
 class ProjectionDSLTest < ES::Projection
   include ES::ProjectionDSL
 
-  define_projection "dsl_test", "test.postings" do
+  define_projection "test.postings" do
     column :id, Int32, serial: true, primary_key: true
     column :name, String, null: false
     column :amount, Int64, null: false
@@ -18,10 +18,6 @@ class ProjectionDSLTest < ES::Projection
 end
 
 describe ES::ProjectionDSL do
-  it "sets the handle" do
-    ProjectionDSLTest.handle.should eq("dsl_test")
-  end
-
   it "sets the table" do
     ProjectionDSLTest.table.should eq("test.postings")
   end

@@ -1,7 +1,6 @@
 # TODO: Implement projector
 module ES
   abstract class Projection
-    @@handle = "Abstract"
     @@table = ""
 
     @event_handlers : ES::EventHandlers
@@ -22,11 +21,6 @@ module ES
       @event_store : ES::EventStore = ES::Config.event_store,
       @projection_database : DB::Database = ES::Config.projection_database,
     )
-    end
-
-    # Returns the projection handle
-    def self.handle
-      @@handle
     end
 
     # Returns the projection table name
@@ -55,7 +49,7 @@ module ES
     # Truncate the projection table and optionally restart the identity sequence
     protected def truncate(restart_identity : Bool = true)
       t = self.class.table
-      raise ES::Exception::NotImplemented.new("No table defined for projection '#{self.class.handle}'") if t.empty?
+      raise ES::Exception::NotImplemented.new("No table defined for projection '#{self.class.name}'") if t.empty?
 
       sql = "TRUNCATE TABLE #{t}"
       sql += " RESTART IDENTITY" if restart_identity
