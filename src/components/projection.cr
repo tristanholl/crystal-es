@@ -1,7 +1,7 @@
 module ES
   abstract class Projection
     @@table = ""
-    @@project_if_empty : Bool = false
+    @@init : Bool = false
     @@projection_batch_size : Int64 = 1000_i64
 
     @event_handlers : ES::EventHandlers
@@ -28,8 +28,8 @@ module ES
       @@table
     end
 
-    def self.project_if_empty? : Bool
-      @@project_if_empty
+    def self.init? : Bool
+      @@init
     end
 
     def self.projection_batch_size : Int64
@@ -54,10 +54,10 @@ module ES
       end
     end
 
-    # If project_if_empty? is set and the projection table is empty, consume all
-    # events from the store in a background fiber until the projection is up to date.
-    def project_if_empty
-      return unless self.class.project_if_empty?
+    # If init? is set and the projection table is empty, consume all events from
+    # the store in a background fiber until the projection is up to date.
+    def init
+      return unless self.class.init?
       return unless table_empty?
 
       spawn do
