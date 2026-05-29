@@ -18,6 +18,10 @@ class MyEventStore < ES::EventStore
 
   def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)
   end
+
+  def last_event_id : UUID?
+    nil
+  end
 end
 
 describe ES::EventStore do

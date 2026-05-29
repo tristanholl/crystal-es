@@ -193,6 +193,39 @@ describe "ES::Projection#init" do
     projection.collected.should be_empty
   end
 
+  it "does not replay when the store is empty" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
+    handlers.register(DummyEvent)
+    db = DBMock.open
+
+    projection = TestProjectIfEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
+    projection.init
+    Fiber.yield
+
+    projection.collected.should be_empty
+  end
+
+  it "stops at the horizon captured before spawning, ignoring events appended afterwards" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
+    handlers.register(DummyEvent)
+    db = DBMock.open
+
+    e1 = DummyEvent.new
+    e2 = DummyEvent.new
+    e3 = DummyEvent.new
+    store.append(e1)
+    store.append(e2)
+    # e3 is appended after init captures the horizon — it must NOT be replayed
+    projection = TestProjectIfEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
+    projection.init
+    store.append(e3)
+    Fiber.yield
+
+    projection.collected.should eq([e1.header.event_id, e2.header.event_id])
+  end
+
   it "skips unregistered event handles during catch-up" do
     store = ES::EventStoreAdapters::InMemory.new
     handlers = ES::EventHandlers.new
