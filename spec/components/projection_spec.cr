@@ -1,7 +1,7 @@
 require "../spec_helper"
 
 class TestProjectIfEmptyProjection < ES::Projection
-  @@project_if_empty = true
+  @@init = true
   @@projection_batch_size = 1_i64
   getter collected : Array(UUID) = [] of UUID
 
@@ -15,7 +15,7 @@ class TestProjectIfEmptyProjection < ES::Projection
 end
 
 class TestProjectNotEmptyProjection < ES::Projection
-  @@project_if_empty = true
+  @@init = true
   getter collected : Array(UUID) = [] of UUID
 
   protected def table_empty? : Bool
@@ -144,8 +144,8 @@ describe ES::Projection do
   end
 end
 
-describe "ES::Projection#project_if_empty" do
-  it "replays all events in the store when table is empty and project_if_empty? is true" do
+describe "ES::Projection#init" do
+  it "replays all events in the store when table is empty and init? is true" do
     store = ES::EventStoreAdapters::InMemory.new
     handlers = ES::EventHandlers.new
     handlers.register(DummyEvent)
@@ -157,7 +157,7 @@ describe "ES::Projection#project_if_empty" do
     store.append(e2)
 
     projection = TestProjectIfEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-    projection.project_if_empty
+    projection.init
     Fiber.yield
 
     projection.collected.should eq([e1.header.event_id, e2.header.event_id])
@@ -172,13 +172,13 @@ describe "ES::Projection#project_if_empty" do
     store.append(DummyEvent.new)
 
     projection = TestProjectNotEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-    projection.project_if_empty
+    projection.init
     Fiber.yield
 
     projection.collected.should be_empty
   end
 
-  it "does not replay when project_if_empty? is false" do
+  it "does not replay when init? is false" do
     store = ES::EventStoreAdapters::InMemory.new
     handlers = ES::EventHandlers.new
     handlers.register(DummyEvent)
@@ -187,7 +187,7 @@ describe "ES::Projection#project_if_empty" do
     store.append(DummyEvent.new)
 
     projection = TestProjectIfEmptyDisabledProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-    projection.project_if_empty
+    projection.init
     Fiber.yield
 
     projection.collected.should be_empty
@@ -202,7 +202,7 @@ describe "ES::Projection#project_if_empty" do
     store.append(DummyEvent.new)
 
     projection = TestProjectIfEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
-    projection.project_if_empty
+    projection.init
     Fiber.yield
 
     projection.collected.should be_empty

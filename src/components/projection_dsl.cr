@@ -17,13 +17,13 @@ module ES
       end
     end
 
-    macro define_projection(table, project_if_empty = false, batch_size = 1000_i64)
+    macro define_projection(table, init = false, batch_size = 1000_i64)
       {% raise "define_projection requires at least one column declaration; add a block with `column` calls" %}
     end
 
-    macro define_projection(table, project_if_empty = false, batch_size = 1000_i64, &block)
+    macro define_projection(table, init = false, batch_size = 1000_i64, &block)
       @@table = {{table}}
-      @@project_if_empty = {{project_if_empty}}
+      @@init = {{init}}
       @@projection_batch_size = {{batch_size}}.to_i64
 
       {%
@@ -108,7 +108,7 @@ module ES
           {% end %}
         end
 
-        project_if_empty
+        init
       end
 
       def setup
