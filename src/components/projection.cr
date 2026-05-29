@@ -56,12 +56,17 @@ module ES
 
     # If init? is set and the projection table is empty, consume all events from
     # the store in a background fiber until the projection is up to date.
+    # The horizon is captured before spawning so the init always terminates,
+    # even when the store is under constant write load.
     def init
       return unless self.class.init?
       return unless table_empty?
 
+      horizon = @event_store.last_event_id
+      return if horizon.nil?
+
       spawn do
-        @event_store.each_event(batch_size: self.class.projection_batch_size) do |es_event|
+        @event_store.each_event(until_event_id: horizon, batch_size: self.class.projection_batch_size) do |es_event|
           handle = es_event.header["event_handle"].as_s
           next unless @event_handlers.registered?(handle)
 
