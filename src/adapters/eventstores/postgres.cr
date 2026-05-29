@@ -97,6 +97,15 @@ module ES
         end
       end
 
+      # Returns the event_id of the most recently appended event, or nil if the store is empty
+      def last_event_id : UUID?
+        result = @db.query_one?(
+          %(SELECT header->>'event_id' FROM "eventstore"."events" ORDER BY header->>'event_id' DESC LIMIT 1),
+          as: String
+        )
+        result ? UUID.new(result) : nil
+      end
+
       # Returns the stream of events for a given aggregate
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new
