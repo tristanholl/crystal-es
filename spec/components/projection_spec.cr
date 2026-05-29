@@ -1,5 +1,44 @@
 require "../spec_helper"
 
+class TestProjectIfEmptyProjection < ES::Projection
+  @@project_if_empty = true
+  @@projection_batch_size = 1_i64
+  getter collected : Array(UUID) = [] of UUID
+
+  protected def table_empty? : Bool
+    true
+  end
+
+  protected def apply(event : ES::Event)
+    @collected << event.header.event_id
+  end
+end
+
+class TestProjectNotEmptyProjection < ES::Projection
+  @@project_if_empty = true
+  getter collected : Array(UUID) = [] of UUID
+
+  protected def table_empty? : Bool
+    false
+  end
+
+  protected def apply(event : ES::Event)
+    @collected << event.header.event_id
+  end
+end
+
+class TestProjectIfEmptyDisabledProjection < ES::Projection
+  getter collected : Array(UUID) = [] of UUID
+
+  protected def table_empty? : Bool
+    true
+  end
+
+  protected def apply(event : ES::Event)
+    @collected << event.header.event_id
+  end
+end
+
 class TestProjection < ES::Projection
   getter collected : Array(UUID) = [] of UUID
 
@@ -102,6 +141,81 @@ describe ES::Projection do
       projection = TestProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
       projection.replay(truncate: false)
     end
+  end
+end
+
+describe "ES::Projection#project_if_empty" do
+  it "replays all events in the store when table is empty and project_if_empty? is true" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
+    handlers.register(DummyEvent)
+    db = DBMock.open
+
+    e1 = DummyEvent.new
+    e2 = DummyEvent.new
+    store.append(e1)
+    store.append(e2)
+
+    projection = TestProjectIfEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
+    projection.project_if_empty
+    Fiber.yield
+
+    projection.collected.should eq([e1.header.event_id, e2.header.event_id])
+  end
+
+  it "does not replay when table is not empty" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
+    handlers.register(DummyEvent)
+    db = DBMock.open
+
+    store.append(DummyEvent.new)
+
+    projection = TestProjectNotEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
+    projection.project_if_empty
+    Fiber.yield
+
+    projection.collected.should be_empty
+  end
+
+  it "does not replay when project_if_empty? is false" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
+    handlers.register(DummyEvent)
+    db = DBMock.open
+
+    store.append(DummyEvent.new)
+
+    projection = TestProjectIfEmptyDisabledProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
+    projection.project_if_empty
+    Fiber.yield
+
+    projection.collected.should be_empty
+  end
+
+  it "skips unregistered event handles during catch-up" do
+    store = ES::EventStoreAdapters::InMemory.new
+    handlers = ES::EventHandlers.new
+    # DummyEvent not registered
+    db = DBMock.open
+
+    store.append(DummyEvent.new)
+
+    projection = TestProjectIfEmptyProjection.new(event_handlers: handlers, event_store: store, projection_database: db)
+    projection.project_if_empty
+    Fiber.yield
+
+    projection.collected.should be_empty
+  end
+end
+
+describe "ES::Projection.projection_batch_size" do
+  it "defaults to 1000" do
+    TestProjection.projection_batch_size.should eq(1000_i64)
+  end
+
+  it "reflects the configured value" do
+    TestProjectIfEmptyProjection.projection_batch_size.should eq(1_i64)
   end
 end
 
