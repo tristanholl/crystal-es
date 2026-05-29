@@ -37,6 +37,20 @@ describe ES::EventStoreAdapters::InMemory do
     end
   end
 
+  it "last_event_id returns nil when the store is empty" do
+    store = ES::EventStoreAdapters::InMemory.new
+    store.last_event_id.should be_nil
+  end
+
+  it "last_event_id returns the most recently appended event's id" do
+    store = ES::EventStoreAdapters::InMemory.new
+    e1 = DummyEvent.new
+    e2 = DummyEvent.new
+    store.append(e1)
+    store.append(e2)
+    store.last_event_id.should eq(e2.header.event_id)
+  end
+
   it "can append, fetch single and all events", tags: "db" do
     store = ES::EventStoreAdapters::InMemory.new
     event = DummyEvent.new
