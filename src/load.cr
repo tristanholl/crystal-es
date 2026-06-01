@@ -3,6 +3,8 @@ require "json"
 require "uuid"
 require "uuid/json"
 require "http/status"
+require "digest/sha256"
+require "log"
 
 # Config of the library
 require "./config.cr"
@@ -24,6 +26,8 @@ require "./components/event_dsl.cr"
 require "./components/event_handlers.cr"
 require "./components/event.cr"
 require "./components/projection.cr"
+require "./components/projection_meta.cr"
+require "./exceptions/schema_drift.cr"
 require "./components/projection_dsl.cr"
 require "./components/projection_registry.cr"
 
