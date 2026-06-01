@@ -17,11 +17,11 @@ module ES
       end
     end
 
-    macro define_projection(table, init = false, batch_size = 1000_i64, reset_on_drift = false)
+    macro define_projection(table, init = false, batch_size = 1000_i64)
       {% raise "define_projection requires at least one column declaration; add a block with `column` calls" %}
     end
 
-    macro define_projection(table, init = false, batch_size = 1000_i64, reset_on_drift = false, &block)
+    macro define_projection(table, init = false, batch_size = 1000_i64, &block)
       @@table = {{table}}
       @@init = {{init}}
       @@projection_batch_size = {{batch_size}}.to_i64
@@ -228,16 +228,6 @@ module ES
         {% end %}
       end
 
-      def force_replay! : Nil
-        meta_helper = ES::ProjectionMeta.new(@projection_database, {{schema_name}})
-        meta_helper.setup
-        @projection_database.exec %(DROP TABLE IF EXISTS "{{schema_name.id}}"."{{table_name.id}}" CASCADE)
-        create_projection_table
-        meta_helper.upsert(self.class.name, self.class.table, self.class.compiled_fingerprint, self.class.compiled_definition)
-        replay(truncate: true)
-        meta_helper.mark_replayed(self.class.name)
-      end
-
       def setup_table
         meta_helper = ES::ProjectionMeta.new(@projection_database, {{schema_name}})
         meta_helper.setup
@@ -249,18 +239,13 @@ module ES
           if stored.fingerprint != compiled_fp
             changes = ES::ProjectionMeta.diff(stored.definition, compiled_def)
             if changes.any? { |c| c.severity == "breaking" }
-              if {{reset_on_drift}} || ENV["ES_PROJECTION_RESET_ALL"]? == "true"
-                force_replay!
-                return
-              else
-                raise ES::Exception::SchemaDrift.new(
-                  projection_class: self.class.name,
-                  table_name: self.class.table,
-                  stored_fingerprint: stored.fingerprint,
-                  compiled_fingerprint: compiled_fp,
-                  changes: changes,
-                )
-              end
+              raise ES::Exception::SchemaDrift.new(
+                projection_class: self.class.name,
+                table_name: self.class.table,
+                stored_fingerprint: stored.fingerprint,
+                compiled_fingerprint: compiled_fp,
+                changes: changes,
+              )
             else
               Log.warn { "Non-breaking schema drift on '#{self.class.name}': #{changes.map(&.description).join(", ")}" }
               meta_helper.upsert(self.class.name, self.class.table, compiled_fp, compiled_def)
