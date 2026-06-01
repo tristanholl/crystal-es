@@ -38,7 +38,6 @@ module ES
       getter fingerprint : String
       getter definition : String
       getter recorded_at : Time
-      getter replayed_at : Time?
 
       def initialize(
         @projection_class : String,
@@ -46,7 +45,6 @@ module ES
         @fingerprint : String,
         @definition : String,
         @recorded_at : Time,
-        @replayed_at : Time?,
       )
       end
     end
@@ -64,7 +62,6 @@ module ES
           "fingerprint"       TEXT        NOT NULL,
           "definition"        JSONB       NOT NULL,
           "recorded_at"       TIMESTAMPTZ NOT NULL DEFAULT now(),
-          "replayed_at"       TIMESTAMPTZ NULL,
           CONSTRAINT projection_meta_pk PRIMARY KEY ("projection_class")
         )
       SQL
@@ -76,19 +73,18 @@ module ES
 
     def fetch(projection_class : String) : MetaRow?
       result = @db.query_one?(
-        %(SELECT projection_class, table_name, fingerprint, definition::text, recorded_at, replayed_at FROM "#{@schema}"."#{META_TABLE}" WHERE projection_class = $1),
+        %(SELECT projection_class, table_name, fingerprint, definition::text, recorded_at FROM "#{@schema}"."#{META_TABLE}" WHERE projection_class = $1),
         projection_class,
-        as: {String, String, String, String, Time, Time?}
+        as: {String, String, String, String, Time}
       )
       return nil if result.nil?
-      pc, tn, fp, defn, recorded, replayed = result
+      pc, tn, fp, defn, recorded = result
       MetaRow.new(
         projection_class: pc,
         table_name: tn,
         fingerprint: fp,
         definition: defn,
-        recorded_at: recorded,
-        replayed_at: replayed
+        recorded_at: recorded
       )
     end
 
@@ -96,13 +92,6 @@ module ES
       @db.exec(
         %(INSERT INTO "#{@schema}"."#{META_TABLE}" (projection_class, table_name, fingerprint, definition, recorded_at) VALUES ($1, $2, $3, $4::jsonb, now()) ON CONFLICT (projection_class) DO UPDATE SET table_name = EXCLUDED.table_name, fingerprint = EXCLUDED.fingerprint, definition = EXCLUDED.definition, recorded_at = EXCLUDED.recorded_at),
         projection_class, table_name, fingerprint, definition
-      )
-    end
-
-    def mark_replayed(projection_class : String) : Nil
-      @db.exec(
-        %(UPDATE "#{@schema}"."#{META_TABLE}" SET replayed_at = now() WHERE projection_class = $1),
-        projection_class
       )
     end
 
