@@ -130,7 +130,7 @@ describe ES::ProjectionMeta do
 
       # Build compiled def with one fewer column
       parsed = JSON.parse(stored)
-      cols = parsed["columns"].as_a[0..-2]  # drop last column
+      cols = parsed["columns"].as_a[0..-2] # drop last column
       shorter = JSON.build do |j|
         j.object do
           j.field "table", parsed["table"].as_s
@@ -145,7 +145,7 @@ describe ES::ProjectionMeta do
 
     it "detects an added column as breaking" do
       stored = ProjectionDSLTestV2.compiled_definition
-      compiled = ProjectionDSLTest.compiled_definition  # has more columns
+      compiled = ProjectionDSLTest.compiled_definition # has more columns
 
       # stored has 4 columns, ProjectionDSLTest has 7 — so positions differ
       # Use a simpler pair: same base + one extra

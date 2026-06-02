@@ -1,8 +1,8 @@
 module ES
   class ProjectionMeta
     struct SchemaChange
-      getter severity : String    # "breaking" | "non_breaking"
-      getter kind : String        # "column_removed" | "column_type_changed" | ...
+      getter severity : String # "breaking" | "non_breaking"
+      getter kind : String     # "column_removed" | "column_type_changed" | ...
       getter description : String
 
       def initialize(@severity : String, @kind : String, @description : String)
