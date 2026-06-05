@@ -223,6 +223,28 @@ describe ES::ProjectionMeta do
       changes.any? { |c| c.kind == "column_crystal_type_changed" && c.severity == "breaking" }.should be_true
     end
 
+    it "detects a primary_key change as breaking" do
+      base = ProjectionDSLTestV2.compiled_definition
+      parsed = JSON.parse(base)
+      cols = parsed["columns"].as_a.map do |c|
+        if c["name"].as_s == "id"
+          JSON.parse(%({"name":"id","sql_type":"SERIAL","crystal_type":"Int32","primary_key":false,"null":false,"default":null,"position":0}))
+        else
+          c
+        end
+      end
+      modified = JSON.build do |j|
+        j.object do
+          j.field "table", parsed["table"].as_s
+          j.field "columns", cols
+          j.field "indexes", parsed["indexes"]
+        end
+      end
+
+      changes = ES::ProjectionMeta.diff(base, modified)
+      changes.any? { |c| c.kind == "column_primary_key_changed" && c.severity == "breaking" }.should be_true
+    end
+
     it "detects a removed index as non_breaking" do
       stored = ProjectionDSLTestV2.compiled_definition
       parsed = JSON.parse(stored)
