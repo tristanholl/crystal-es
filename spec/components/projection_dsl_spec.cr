@@ -62,6 +62,18 @@ describe ES::ProjectionDSL do
       col.call("created_at")["sql_type"].as_s.should eq("TIMESTAMPTZ")
     end
 
+    it "records the Crystal source type for each column" do
+      parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
+      cols = parsed["columns"].as_a
+      col = ->(name : String) { cols.find! { |c| c["name"].as_s == name } }
+
+      col.call("id")["crystal_type"].as_s.should eq("Int32")
+      col.call("name")["crystal_type"].as_s.should eq("String")
+      col.call("amount")["crystal_type"].as_s.should eq("Int64")
+      col.call("active")["crystal_type"].as_s.should eq("Bool")
+      col.call("created_at")["crystal_type"].as_s.should eq("Time")
+    end
+
     it "records nullability" do
       parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
       cols = parsed["columns"].as_a
@@ -185,6 +197,30 @@ describe ES::ProjectionMeta do
 
       changes = ES::ProjectionMeta.diff(base, modified)
       changes.any? { |c| c.kind == "column_type_changed" && c.severity == "breaking" }.should be_true
+    end
+
+    it "detects a Crystal type change as breaking even when sql_type is identical" do
+      # Reproduces the serial: true bug: Int32 vs Int64 both produce sql_type SERIAL
+      # but they differ in crystal_type and must be caught.
+      base = ProjectionDSLTestV2.compiled_definition
+      parsed = JSON.parse(base)
+      cols = parsed["columns"].as_a.map do |c|
+        if c["name"].as_s == "id"
+          JSON.parse(%({"name":"id","sql_type":"SERIAL","crystal_type":"Int64","primary_key":true,"null":false,"default":null,"position":0}))
+        else
+          c
+        end
+      end
+      modified = JSON.build do |j|
+        j.object do
+          j.field "table", parsed["table"].as_s
+          j.field "columns", cols
+          j.field "indexes", parsed["indexes"]
+        end
+      end
+
+      changes = ES::ProjectionMeta.diff(base, modified)
+      changes.any? { |c| c.kind == "column_crystal_type_changed" && c.severity == "breaking" }.should be_true
     end
 
     it "detects a removed index as non_breaking" do
