@@ -24,7 +24,7 @@ The library provides:
 - **Aggregates** — reconstruct domain state by replaying events
 - **Commands** — enforce business logic and emit events
 - **Events** — immutable facts with a type-safe DSL
-- **Projections** — read models built from event streams, with a schema DSL
+- **Projections** — read models built from event streams, with a schema DSL and schema drift detection
 - **Event Bus** — fan-out published events to registered handlers
 - **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
 
@@ -148,6 +148,40 @@ end
 **`index(columns, unique: false, name: nil)`** — add an index to the projection table.
 
 **`apply(EventClass) { |event| ... }`** — handle an event to update the read model.
+
+#### Schema Drift Detection
+
+Every projection schema is **immutable**. When `setup_table` is called, the library computes a SHA-256 fingerprint of the compiled schema (columns, types, nullability, defaults, indexes) and compares it against the fingerprint stored in `_crystal_es_projection_metadata`. If they diverge, a `ES::Exception::SchemaDrift` exception is raised before the projection can run.
+
+**Breaking changes** (raise `SchemaDrift`):
+- Column added, removed, or reordered
+- Column type or Crystal type changed
+- Nullability or default value changed
+- Primary key changed
+
+**Non-breaking changes** (logged as a warning, metadata updated):
+- Index added, removed, or modified
+
+The error message tells you exactly what changed:
+
+```
+Schema drift detected for 'Ledger' (table: finance.ledger).
+Stored fingerprint:   abc123...
+Compiled fingerprint: def456...
+Changes:
+  breaking column_type_changed: column "amount" type changed from TEXT to BIGINT
+Projection schemas are immutable. Define a new projection class with a new table
+name, populate it from the event store, then rewire the application to the new projection.
+```
+
+To evolve a projection, create a new projection class targeting a new table name, replay the event store into it, then cut the application over. There is no in-place migration path — this is by design.
+
+You can also inspect drift status without triggering an exception:
+
+```crystal
+status = Ledger.drift_status(db)
+# => ES::ProjectionMeta::DriftStatus with fingerprints and list of SchemaChange objects
+```
 
 ---
 
