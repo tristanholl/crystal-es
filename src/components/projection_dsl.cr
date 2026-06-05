@@ -91,6 +91,7 @@ module ES
                   json.object do
                     json.field "name", "{{col_name}}"
                     json.field "sql_type", {{sql_type}}
+                    json.field "crystal_type", {{col_type_str}}
                     json.field "primary_key", {{is_primary}}
                     json.field "null", {{is_null}}
                     {% if has_default %}

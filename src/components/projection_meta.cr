@@ -133,6 +133,12 @@ module ES
               changes << SchemaChange.new("breaking", "column_default_changed",
                 "Column '#{col_name}' default changed from #{sc["default"]} to #{cc["default"]}")
             end
+            sc_ct = sc["crystal_type"]?
+            cc_ct = cc["crystal_type"]?
+            if sc_ct && cc_ct && sc_ct != cc_ct
+              changes << SchemaChange.new("breaking", "column_crystal_type_changed",
+                "Column '#{col_name}' Crystal type changed from #{sc_ct} to #{cc_ct}")
+            end
           end
         end
       end
