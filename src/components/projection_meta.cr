@@ -49,7 +49,7 @@ module ES
       end
     end
 
-    META_TABLE = "projection_meta"
+    META_TABLE = "_crystal_es_projection_metadata"
 
     def initialize(@db : DB::Database, @schema : String)
     end
@@ -66,7 +66,7 @@ module ES
         )
       SQL
       @db.exec <<-SQL
-        CREATE UNIQUE INDEX IF NOT EXISTS projection_meta_table_name_uidx
+        CREATE UNIQUE INDEX IF NOT EXISTS crystal_es_projection_metadata_table_name_uidx
           ON "#{@schema}"."#{META_TABLE}" ("table_name")
       SQL
     end
