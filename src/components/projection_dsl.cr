@@ -248,7 +248,10 @@ module ES
                 changes: changes,
               )
             else
-              Log.warn { "Non-breaking schema drift on '#{self.class.name}': #{changes.map(&.description).join(", ")}" }
+              reason = changes.empty? \
+                ? "definition metadata was updated (no structural changes detected)" \
+                : changes.map(&.description).join(", ")
+              Log.warn { "Non-breaking schema drift on '#{self.class.name}': #{reason}" }
               meta_helper.upsert(self.class.name, self.class.table, compiled_fp, compiled_def)
             end
           end
