@@ -19,7 +19,7 @@ module ES
         m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON SEQUENCES TO pg_monitor; )
         m << %(
           CREATE TABLE "eventstore"."events" (
-            "id" SERIAL PRIMARY KEY,
+            "id" BIGSERIAL PRIMARY KEY,
             "header" jsonb NOT NULL,
             "body" jsonb NOT NULL
           );
@@ -76,12 +76,12 @@ module ES
         loop do
           rows = if uid = until_event_id
                    @db.query_all(
-                     %(SELECT id, header, body FROM "eventstore"."events" WHERE id > $1 AND id <= (SELECT id FROM "eventstore"."events" WHERE header->>'event_id' = $2) ORDER BY id ASC LIMIT $3),
+                     %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE id > $1 AND id <= (SELECT id FROM "eventstore"."events" WHERE header->>'event_id' = $2) ORDER BY id ASC LIMIT $3),
                      cursor, uid.to_s, batch_size, as: {Int64, JSON::Any, JSON::Any}
                    )
                  else
                    @db.query_all(
-                     %(SELECT id, header, body FROM "eventstore"."events" WHERE id > $1 ORDER BY id ASC LIMIT $2),
+                     %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE id > $1 ORDER BY id ASC LIMIT $2),
                      cursor, batch_size, as: {Int64, JSON::Any, JSON::Any}
                    )
                  end
