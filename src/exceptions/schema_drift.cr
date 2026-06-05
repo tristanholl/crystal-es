@@ -19,7 +19,7 @@ module ES
                   "Stored fingerprint:   #{@stored_fingerprint}\n" \
                   "Compiled fingerprint: #{@compiled_fingerprint}\n" \
                   "Changes:\n#{change_summary}\n" \
-                  "Projections are immutable. Define a new projection class with a new table name, " \
+                  "Projection schemas are immutable. Define a new projection class with a new table name, " \
                   "populate it from the event store, then rewire the application to the new projection."
         super(message, print_backtrace: true, status_code: HTTP::Status::INTERNAL_SERVER_ERROR, type: self.class.to_s)
       end
