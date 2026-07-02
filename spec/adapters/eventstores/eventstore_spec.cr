@@ -5,15 +5,23 @@ class MyEventStore < ES::EventStore
     # Noop
   end
 
-  def append(event : ES::Event)
+  def append(events : Array(ES::Event), condition : ES::AppendCondition = ES::AppendCondition.none)
   end
 
   def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
     [] of ES::EventStore::Event
   end
 
+  def fetch_events(tag : String) : Array(ES::EventStore::Event)
+    [] of ES::EventStore::Event
+  end
+
   def fetch_event(event_id : UUID) : ES::EventStore::Event
     nil
+  end
+
+  def last_version(sequence_key : String) : Int32
+    0
   end
 
   def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)

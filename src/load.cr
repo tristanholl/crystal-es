@@ -20,6 +20,8 @@ require "./exceptions/not_implemented.cr"
 
 # Event sourcing components
 require "./components/aggregate.cr"
+require "./components/append_condition.cr"
+require "./components/boundary.cr"
 require "./components/command.cr"
 require "./components/event_bus.cr"
 require "./components/event_dsl.cr"

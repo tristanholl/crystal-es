@@ -111,6 +111,61 @@ end
 
 ---
 
+### Dynamic Consistency Boundaries (DCB)
+
+Classic event sourcing enforces consistency per single aggregate. With **dynamic consistency boundaries** a command can build its decision model from *several* sequences — aggregates and/or **tags** — and atomically append events **conditioned on none of those sequences having advanced** since they were read.
+
+The consistency condition is based purely on per-sequence version numbers (the same optimistic versioning aggregates already use), never on a global sequence. The global `BIGSERIAL id` of the Postgres store remains a projection-replay ordering concern only.
+
+**Sequences.** Every event belongs to one or more sequences, each with its own monotonically increasing version:
+- its primary aggregate (`aggregate_id` / `aggregate_version`), as before
+- any number of extra **tags** via the new `tags` header field (`Hash(String, Int32)`), e.g. `{"course:<uuid>" => 3}`
+
+**Conditional append.** `EventStore#append(events, condition)` atomically appends a batch and raises `ES::Exception::Conflict` if any sequence named in the `ES::AppendCondition` advanced past its expected version — including sequences the batch does not write to (read-only boundary members). In Postgres this is enforced with per-sequence advisory locks and an `event_tags` table with a `UNIQUE(tag, tag_version)` backstop; the in-memory store enforces identical semantics.
+
+**`ES::Boundary`** is the command-layer API: load the sequences the decision depends on (capturing their versions), stage events, and commit atomically.
+
+```crystal
+class Commands::SubscribeStudent < ES::Command
+  def call
+    # Boundary member 1: the student aggregate
+    student = boundary.load(Student.new(@aggregate_id))
+
+    # Boundary member 2: the course tag sequence (the course is not an aggregate)
+    course_tag = "course:#{@course_id}"
+    subscriptions = 0
+    boundary.load(course_tag) do |event|
+      subscriptions += 1 if event.header["event_handle"] == "student_subscribed"
+    end
+
+    raise ES::Exception::InvalidState.new("course full") if subscriptions >= 10
+    raise ES::Exception::InvalidState.new("too many courses") if student.state.course_count >= 5
+
+    boundary.stage(Events::StudentSubscribed.new(
+      aggregate_id: @aggregate_id,
+      aggregate_version: boundary.next_version(student),
+      tags: {course_tag => boundary.next_version(course_tag)},
+      course_id: @course_id,
+      # ...
+    ))
+
+    # Atomic: raises ES::Exception::Conflict if the student OR the course
+    # sequence advanced since it was loaded
+    boundary.commit
+  end
+end
+```
+
+If two such commands race, the loser gets an `ES::Exception::Conflict` even though the two events live under different primary aggregates — the shared course tag serializes them. A sequence can also be enlisted read-only (assert it did not change without writing to it) via `boundary.load(tag) { ... }` or `boundary.track(key, version)` with no staged event carrying that tag.
+
+A complete runnable example lives in [`./examples/course-subscription`](./examples/course-subscription) (`crystal run examples/course-subscription/example.cr` — uses the in-memory store, no infrastructure needed).
+
+> **Note on Postgres pooling:** the conditional append relies on transaction-scoped advisory locks; all statements run on a single connection inside one transaction. When using a pooling proxy, transaction pooling is the minimum requirement — statement pooling breaks the lock semantics.
+
+> **Migration:** `EventStore#setup` is idempotent; re-running it on an existing store creates the `event_tags` table and backfills the primary-aggregate memberships of existing events.
+
+---
+
 ### Projection
 
 `ES::Projection` maintains a read model by consuming events in order. It can be replayed from scratch at any time.

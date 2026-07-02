@@ -58,6 +58,7 @@ module ES
         comment = "",
         aggregate_id = UUID.v7,
         aggregate_version : Int32 = 1,
+        tags : Hash(String, Int32) = {} of String => Int32,
       )
         @header = Header.new(
           actor_id: actor_id,
@@ -65,7 +66,8 @@ module ES
           aggregate_type: @@type,
           aggregate_version: aggregate_version,
           command_handler: command_handler,
-          event_handle: @@handle
+          event_handle: @@handle,
+          tags: tags
         )
         @body = Body.new(
           comment: comment,
