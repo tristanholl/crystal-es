@@ -21,6 +21,14 @@ module ES
         @aggregate_version + 1
       end
 
+      # Setter for aggregate_version without ordering validation.
+      # Used by the pure evolve path so fold works on any starting state.
+      # Prefer this over increase_version in evolve: increase_version enforces
+      # consecutive ordering, which must not be assumed across arbitrary slices.
+      def aggregate_version=(version : Int32)
+        @aggregate_version = version
+      end
+
       # Sets the type of the aggregate
       def set_type(type : String)
         @aggregate_type = type
