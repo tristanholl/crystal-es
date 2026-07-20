@@ -2,7 +2,7 @@ require "../../spec_helper"
 require "./eventstore_behavior"
 
 describe ES::EventStoreAdapters::InMemory do
-  eventstore_dcb_examples(->{ ES::EventStoreAdapters::InMemory.new })
+  eventstore_dcb_examples(-> { ES::EventStoreAdapters::InMemory.new })
   it "does not forward events to the queue when the batch conflicts" do
     queue = ES::QueueAdapters::InMemory.new("default")
     store = ES::EventStoreAdapters::InMemory.new(queue)
