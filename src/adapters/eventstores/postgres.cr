@@ -7,9 +7,6 @@ module ES
 
       # Initializes the database with the necessary schema, table and permissions for the eventstore
       def setup
-        skip = @db.query_one %(SELECT EXISTS (SELECT FROM pg_tables WHERE  schemaname = 'eventstore' AND tablename  = 'events');), as: Bool
-        return true if skip
-
         m = Array(String).new
         m << %( CREATE SCHEMA IF NOT EXISTS "eventstore"; )
         m << %( GRANT USAGE ON SCHEMA "eventstore" TO pg_monitor; )
@@ -18,14 +15,36 @@ module ES
         m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON TABLES TO pg_monitor; )
         m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON SEQUENCES TO pg_monitor; )
         m << %(
-          CREATE TABLE "eventstore"."events" (
+          CREATE TABLE IF NOT EXISTS "eventstore"."events" (
             "id" BIGSERIAL PRIMARY KEY,
             "header" jsonb NOT NULL,
             "body" jsonb NOT NULL
           );
         )
 
-        m << %(CREATE UNIQUE INDEX aggregate_id_version_idx ON "eventstore"."events"((header->>'aggregate_id'), (header->>'aggregate_version'));)
+        m << %(CREATE UNIQUE INDEX IF NOT EXISTS aggregate_id_version_idx ON "eventstore"."events"((header->>'aggregate_id'), (header->>'aggregate_version'));)
+
+        # Sequence memberships of every event: the primary aggregate plus any tags.
+        # The primary key enforces per-sequence version uniqueness as a backstop for
+        # the conditional append.
+        m << %(
+          CREATE TABLE IF NOT EXISTS "eventstore"."event_tags" (
+            "tag"         TEXT   NOT NULL,
+            "tag_version" INT    NOT NULL,
+            "event_id"    BIGINT NOT NULL REFERENCES "eventstore"."events"("id") ON DELETE CASCADE,
+            PRIMARY KEY ("tag", "tag_version")
+          );
+        )
+        m << %(CREATE INDEX IF NOT EXISTS event_tags_event_id_idx ON "eventstore"."event_tags"("event_id");)
+
+        # Backfill primary-aggregate memberships for events appended before the
+        # event_tags table existed (idempotent)
+        m << %(
+          INSERT INTO "eventstore"."event_tags" (tag, tag_version, event_id)
+          SELECT e.header->>'aggregate_id', (e.header->>'aggregate_version')::INT, e.id
+          FROM "eventstore"."events" e
+          ON CONFLICT DO NOTHING;
+        )
 
         m << %(
           CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened"
@@ -36,6 +55,7 @@ module ES
             e.header ->> 'event_handle' AS "event_handle",
             e.header ->> 'aggregate_version' AS "aggregate_version",
             e.header ->> 'aggregate_type' AS "aggregate_type",
+            e.header -> 'tags' AS "tags",
             e.header,
             e.body
           FROM
@@ -49,9 +69,57 @@ module ES
         m.each { |s| @db.exec s }
       end
 
-      # Appends an event to the event stream
-      def append(event : ES::Event)
-        @db.exec %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2)), event.header.to_json, event.body.to_json
+      # Atomically appends a batch of events, guarded by an append condition.
+      #
+      # All sequence keys involved (condition members and written sequences) are
+      # serialized via transaction-scoped advisory locks, acquired in sorted order to
+      # avoid deadlocks. Under those locks the current version of every sequence is
+      # validated against the condition and the staged versions, so read-only boundary
+      # members are race-free without SERIALIZABLE isolation.
+      def append(events : Array(ES::Event), condition : ES::AppendCondition = ES::AppendCondition.none)
+        written = Hash(String, Array(Int32)).new { |hash, key| hash[key] = Array(Int32).new }
+        events.each do |event|
+          event.memberships.each { |key, version| written[key] << version }
+        end
+
+        keys = (condition.expected.keys + written.keys).uniq.sort
+
+        @db.transaction do |tx|
+          cnn = tx.connection
+
+          keys.each do |key|
+            cnn.exec %(SELECT pg_advisory_xact_lock(hashtextextended($1, 0))), key
+          end
+
+          keys.each do |key|
+            actual = cnn.query_one %(SELECT COALESCE(MAX(tag_version), 0)::INT FROM "eventstore"."event_tags" WHERE tag = $1), key, as: Int32
+
+            if expected = condition.expected[key]?
+              raise ES::Exception::Conflict.new("Sequence '#{key}' is at version '#{actual}', expected version '#{expected}'") if actual != expected
+            end
+
+            if staged = written[key]?
+              staged.sort!
+              expected_range = ((actual + 1)..(actual + staged.size)).to_a
+              raise ES::Exception::Conflict.new("Non-contiguous versions for sequence '#{key}': provided versions '#{staged}', current version '#{actual}'") if staged != expected_range
+            end
+          end
+
+          events.each do |event|
+            row_id = cnn.query_one %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2) RETURNING id), event.header.to_json, event.body.to_json, as: Int64
+
+            event.memberships.each do |tag, version|
+              cnn.exec %(INSERT INTO "eventstore"."event_tags" (tag, tag_version, event_id) VALUES ($1, $2, $3)), tag, version, row_id
+            end
+          end
+        end
+      rescue ex : ES::Exception::Error
+        raise ex
+      rescue ex
+        # Backstop: translate unique violations (SQLSTATE 23505) raised by the events
+        # or event_tags constraints into a Conflict
+        raise ES::Exception::Conflict.new("Concurrent append detected: #{ex.message}") if ex.message.try(&.matches?(/23505|duplicate key/))
+        raise ex
       end
 
       # Returns a single event for a given id
@@ -106,6 +174,11 @@ module ES
         result ? UUID.new(result) : nil
       end
 
+      # Returns the last version of the given sequence (aggregate_id or tag), 0 if empty
+      def last_version(sequence_key : String) : Int32
+        @db.query_one %(SELECT COALESCE(MAX(tag_version), 0)::INT FROM "eventstore"."event_tags" WHERE tag = $1), sequence_key, as: Int32
+      end
+
       # Returns the stream of events for a given aggregate
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new
@@ -113,6 +186,21 @@ module ES
         prepared_statement = @db.build(%(SELECT header, body FROM "eventstore"."events" WHERE header->>'aggregate_id'=$1 ORDER BY (header->>'aggregate_version')::INT ASC))
 
         prepared_statement.query(aggregate_id) do |result|
+          result.each do
+            event_array << ES::EventStore::Event.new(result.read(JSON::Any), result.read(JSON::Any))
+          end
+        end
+
+        event_array
+      end
+
+      # Returns the stream of events for a given sequence key (aggregate_id or tag), ordered by that sequence's version
+      def fetch_events(tag : String) : Array(ES::EventStore::Event)
+        event_array = Array(ES::EventStore::Event).new
+
+        prepared_statement = @db.build(%(SELECT e.header, e.body FROM "eventstore"."events" e JOIN "eventstore"."event_tags" t ON t.event_id = e.id WHERE t.tag = $1 ORDER BY t.tag_version ASC))
+
+        prepared_statement.query(tag) do |result|
           result.each do
             event_array << ES::EventStore::Event.new(result.read(JSON::Any), result.read(JSON::Any))
           end

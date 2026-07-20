@@ -4,6 +4,7 @@ module ES
 
     @aggregate_id : UUID
     @trigger_event : ES::Event?
+    @boundary : ES::Boundary?
 
     # Initialize with a random aggregate ID
     def initialize(
@@ -19,6 +20,11 @@ module ES
       @event_store : ES::EventStore = ES::Config.event_store,
       @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
     )
+    end
+
+    # Returns the memoized consistency boundary for this command
+    def boundary : ES::Boundary
+      @boundary ||= ES::Boundary.new(@event_store)
     end
 
     # Execute command with trigger event parameter

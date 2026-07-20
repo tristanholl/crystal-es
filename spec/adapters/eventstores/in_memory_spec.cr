@@ -1,6 +1,24 @@
 require "../../spec_helper"
+require "./eventstore_behavior"
 
 describe ES::EventStoreAdapters::InMemory do
+  eventstore_dcb_examples(-> { ES::EventStoreAdapters::InMemory.new })
+  it "does not forward events to the queue when the batch conflicts" do
+    queue = ES::QueueAdapters::InMemory.new("default")
+    store = ES::EventStoreAdapters::InMemory.new(queue)
+    aggregate_id = UUID.v7
+
+    store.append(DummyEvent.new(aggregate_id: aggregate_id, aggregate_version: 1))
+    queue.cursor.should eq(1)
+
+    duplicate = DummyEvent.new(aggregate_id: aggregate_id, aggregate_version: 1)
+    expect_raises(ES::Exception::Conflict) do
+      store.append([DummyEvent.new, duplicate] of ES::Event)
+    end
+
+    queue.cursor.should eq(1)
+  end
+
   it "each_event yields all events in insertion order" do
     store = ES::EventStoreAdapters::InMemory.new
     e1 = DummyEvent.new

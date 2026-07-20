@@ -17,6 +17,7 @@ module ES
       getter event_handle : String = "undefined"
       getter event_id : UUID = UUID.v7
       getter event_version : String = "1.0.0"
+      getter tags : Hash(String, Int32) = {} of String => Int32
 
       # Default constructor
       def initialize; end
@@ -31,6 +32,7 @@ module ES
         @aggregate_type = "undefined",
         @command_handler = "undefined",
         @command_handler_version = ES::Config.version,
+        @tags = {} of String => Int32,
       )
       end
     end
@@ -53,6 +55,11 @@ module ES
     # Returns the event handle
     def self.handle
       @@handle
+    end
+
+    # Returns all sequence memberships of the event: the primary aggregate plus any tags
+    def memberships : Hash(String, Int32)
+      {header.aggregate_id.to_s => header.aggregate_version}.merge(header.tags)
     end
 
     def initialize

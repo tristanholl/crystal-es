@@ -36,14 +36,19 @@ class DummyEvent < ES::Event
     @body = Body.from_json(body.to_json)
   end
 
-  def initialize
+  def initialize(
+    aggregate_id : UUID = UUID.v7,
+    aggregate_version : Int32 = 1,
+    tags : Hash(String, Int32) = {} of String => Int32,
+  )
     @header = Header.new(
       actor_id: UUID.v7,
-      aggregate_id: UUID.v7,
+      aggregate_id: aggregate_id,
       aggregate_type: "Test",
-      aggregate_version: 1,
+      aggregate_version: aggregate_version,
       command_handler: "test",
-      event_handle: @@handle
+      event_handle: @@handle,
+      tags: tags
     )
     @body = Body.new("comment")
   end
