@@ -6,6 +6,7 @@ require "../../src/crystal-es"
 
 require "./aggregate"
 require "./commands/process_transaction"
+require "./reactors/on_transaction_initiated"
 require "./events/transaction_accepted"
 require "./events/transaction_initiated"
 require "./events/transaction_rejected"
@@ -40,14 +41,13 @@ p = Projections::Ledger.new
 p.setup
 
 # Initialize event bus
-ES::Config.event_bus = ES::EventBus(ES::Command.class | ES::Projection.class).new(store, event_handlers)
-# ES::Config.event_bus = ES::EventBus(ES::Command.class | ES::Projection.class).new(store, event_handlers)
+ES::Config.event_bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new(store, event_handlers)
 bus = ES::Config.event_bus
 
-# Subscribing command handlers to events
+# Subscribing reactors and projections to events
 bus.subscribe(Events::TransactionAccepted, Projections::Ledger)
 bus.subscribe(Events::TransactionInitiated, [
-  Commands::ProcessTransaction,
+  Reactors::OnTransactionInitiated,
   Projections::Ledger,
 ])
 bus.subscribe(Events::TransactionRejected, Projections::Ledger)

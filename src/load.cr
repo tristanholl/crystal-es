@@ -21,6 +21,8 @@ require "./exceptions/not_implemented.cr"
 # Event sourcing components
 require "./components/aggregate.cr"
 require "./components/command.cr"
+require "./components/command_handler.cr"
+require "./components/reactor.cr"
 require "./components/event_bus.cr"
 require "./components/event_dsl.cr"
 require "./components/event_handlers.cr"

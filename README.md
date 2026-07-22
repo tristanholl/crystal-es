@@ -22,10 +22,12 @@ An event sourcing library for Crystal
 
 The library provides:
 - **Aggregates** — reconstruct domain state by replaying events
-- **Commands** — enforce business logic and emit events
+- **Commands** — pure data records expressing an intent to change state
+- **Command Handlers** — enforce business logic and emit events
+- **Reactors** — consume events off the bus and trigger the next command
 - **Events** — immutable facts with a type-safe DSL
 - **Projections** — read models built from event streams, with a schema DSL and schema drift detection
-- **Event Bus** — fan-out published events to registered handlers
+- **Event Bus** — fan-out published events to reactors and projections
 - **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
 
 A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction).
@@ -93,17 +95,56 @@ Call `Order.hydrate(aggregate_id, event_store)` to reconstruct an aggregate from
 
 ### Command
 
-`ES::Command` encapsulates a single business operation. It hydrates the relevant aggregate, evaluates business rules, and appends new events.
+`ES::Command` is a pure data record expressing an intent to change state. Following strict event sourcing, it carries only the target aggregate and its payload — it has no behavior.
 
 ```crystal
-class PlaceOrder < ES::Command
-  def call
-    order = Order.hydrate(@aggregate_id, event_store)
-    raise ES::InvalidState.new("already placed") if order.state.placed
+struct PlaceOrder < ES::Command
+  getter amount : Int64
 
-    append OrderPlaced.new(
-      aggregate_id: @aggregate_id,
-      body: OrderPlaced::Body.new(order_id: @aggregate_id, amount: @amount)
+  def initialize(@aggregate_id : UUID, @amount : Int64)
+  end
+end
+```
+
+---
+
+### Command Handler
+
+`ES::CommandHandler(C)` encapsulates a single business operation. It is generic over the command type `C` it processes, so `handle(command : C)` is checked by the compiler. It hydrates the relevant aggregate, enforces state invariants, and appends new events.
+
+A handler is a plain object — construct it and call `handle` directly. From an API endpoint that call is synchronous, so an invariant violation raises right where you can turn it into a response:
+
+```crystal
+class PlaceOrderHandler < ES::CommandHandler(PlaceOrder)
+  def handle(command : PlaceOrder)
+    order = Order.new(command.aggregate_id, event_store: @event_store)
+    order.hydrate
+    raise ES::Exception::InvalidState.new("already placed") if order.state.placed
+
+    @event_store.append(OrderPlaced.new(
+      aggregate_id: command.aggregate_id,
+      body: OrderPlaced::Body.new(amount: command.amount)
+    ))
+  end
+end
+
+# In an API controller — invariant failures surface synchronously
+PlaceOrderHandler.new.handle(PlaceOrder.new(aggregate_id: id, amount: 500_i64))
+```
+
+---
+
+### Reactor
+
+`ES::Reactor` consumes events from the `EventBus` and reacts to them — typically by constructing a command and calling its handler directly. It is the one bridge from an event back to a command; each step of a workflow is a named reactor. Declare the event it listens to with `reacts_to`:
+
+```crystal
+class OnOrderPlaced < ES::Reactor
+  reacts_to OrderPlaced
+
+  def call(event : OrderPlaced)
+    ReserveStockHandler.new(event_store: @event_store).handle(
+      ReserveStock.new(aggregate_id: event.header.aggregate_id)
     )
   end
 end
@@ -187,12 +228,12 @@ status = Ledger.drift_status(db)
 
 ### Event Bus
 
-`ES::EventBus` fans out published events to all registered handlers (commands and projections).
+`ES::EventBus` fans out published events to all registered subscribers (reactors and projections). It never runs business logic itself and never touches a command handler — reactors reach handlers by a direct call.
 
 ```crystal
-bus = ES::EventBus(ES::Command | ES::Projection).new
-bus.subscribe(OrderPlaced, PlaceOrderHandler)
-bus.subscribe(OrderPlaced, OrdersProjection)
+bus = ES::EventBus(ES::Reactor | ES::Projection).new
+bus.subscribe(OrderPlaced, OnOrderPlaced)     # a reactor
+bus.subscribe(OrderPlaced, OrdersProjection)  # a projection
 
 bus.publish(event)
 ```
@@ -225,7 +266,7 @@ bus.publish(event)
 ES::Config.configure do |c|
   c.event_store = ES::Adapters::EventStores::Postgres.new(db)
   c.queue       = ES::Adapters::Queues::Postgres.new(db)
-  c.event_bus   = ES::EventBus(ES::Command | ES::Projection).new
+  c.event_bus   = ES::EventBus(ES::Reactor | ES::Projection).new
 end
 ```
 
@@ -309,26 +350,47 @@ class Transaction < ES::Aggregate
 end
 ```
 
-### 3. Define a Command
+### 3. Define a Command and its Handler
 
 ```crystal
 # commands/process_transaction.cr
-class ProcessTransaction < ES::Command
+struct ProcessTransaction < ES::Command
+end
+
+class ProcessTransactionHandler < ES::CommandHandler(ProcessTransaction)
   LIMIT = 10_000_i64
 
-  def call
-    tx = Transaction.hydrate(@aggregate_id, event_store)
+  def handle(command : ProcessTransaction)
+    tx = Transaction.new(command.aggregate_id, event_store: @event_store)
+    tx.hydrate
 
     if tx.state.amount <= LIMIT
-      append TransactionAccepted.new(aggregate_id: @aggregate_id)
+      @event_store.append(TransactionAccepted.new(aggregate_id: command.aggregate_id))
     else
-      append TransactionRejected.new(aggregate_id: @aggregate_id)
+      @event_store.append(TransactionRejected.new(aggregate_id: command.aggregate_id))
     end
   end
 end
 ```
 
-### 4. Define a Projection
+### 4. Define a Reactor
+
+The reactor turns an incoming event into the next command. This is where the workflow lives — `TransactionInitiated` triggers `ProcessTransaction`.
+
+```crystal
+# reactors/on_transaction_initiated.cr
+class OnTransactionInitiated < ES::Reactor
+  reacts_to TransactionInitiated
+
+  def call(event : TransactionInitiated)
+    ProcessTransactionHandler.new(event_store: @event_store).handle(
+      ProcessTransaction.new(aggregate_id: event.header.aggregate_id)
+    )
+  end
+end
+```
+
+### 5. Define a Projection
 
 ```crystal
 # projections/ledger.cr
@@ -368,7 +430,7 @@ define_projection("finance", "ledger") do
 end
 ```
 
-### 5. Wire Everything Together
+### 6. Wire Everything Together
 
 ```crystal
 require "crystal-es"
@@ -380,7 +442,7 @@ db = DB.open(ENV["DATABASE_URL"])
 ES::Config.configure do |c|
   c.event_store    = ES::Adapters::EventStores::Postgres.new(db)
   c.queue          = ES::Adapters::Queues::Postgres.new(db)
-  c.event_bus      = ES::EventBus(ES::Command | ES::Projection).new
+  c.event_bus      = ES::EventBus(ES::Reactor | ES::Projection).new
   c.event_handlers = ES::EventHandlers.new
 end
 
@@ -389,9 +451,9 @@ ES::Config.event_handlers.register(TransactionInitiated)
 ES::Config.event_handlers.register(TransactionAccepted)
 ES::Config.event_handlers.register(TransactionRejected)
 
-# Subscribe handlers to events
+# Subscribe reactors and projections to events
 bus = ES::Config.event_bus
-bus.subscribe(TransactionInitiated, ProcessTransaction)
+bus.subscribe(TransactionInitiated, OnTransactionInitiated)
 bus.subscribe(TransactionInitiated, Ledger)
 bus.subscribe(TransactionAccepted,  Ledger)
 bus.subscribe(TransactionRejected,  Ledger)
