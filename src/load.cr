@@ -31,6 +31,12 @@ require "./exceptions/schema_drift.cr"
 require "./components/projection_dsl.cr"
 require "./components/projection_registry.cr"
 
+# Decider pattern components (additive — existing ES::Command API unchanged)
+require "./decision.cr"
+require "./decider.cr"
+require "./command_handler.cr"
+require "./dcb_handler.cr"
+
 # Infrastructure adapters
 # # Event stores
 require "./adapters/eventstores/eventstore.cr"

@@ -1,7 +1,9 @@
 module ES
-  abstract class Command
-    abstract def call
-
+  # Base class for behavioral commands (pre-Phase-5 style).
+  # As of v0.7.0 this carries no abstract contract — use ES::Decider +
+  # ES::CommandHandler for new code.  This class is kept for source
+  # compatibility with existing subclasses during the transition window.
+  class Command
     @aggregate_id : UUID
     @trigger_event : ES::Event?
 
@@ -19,19 +21,6 @@ module ES
       @event_store : ES::EventStore = ES::Config.event_store,
       @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
     )
-    end
-
-    # Execute command with trigger event parameter
-    def call(event : ES::Event)
-      @aggregate_id = event.header.aggregate_id
-      @trigger_event = event
-
-      call
-    end
-
-    # Placeholder for subclasses
-    def call
-      raise ES::Exception::NotImplemented.new("The command class does not properly implement the call() function")
     end
   end
 end

@@ -49,7 +49,8 @@ class DummyEvent < ES::Event
   end
 end
 
-# Default Command
+# Default Command — still extends ES::Command for backward-compat type checks.
+# call is a regular method now (no longer satisfying an abstract contract).
 class DummyCommand < ES::Command
   getter test_attribute : Bool = false
 
