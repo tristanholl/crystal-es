@@ -49,11 +49,28 @@ class DummyEvent < ES::Event
   end
 end
 
-# Default Command
-class DummyCommand < ES::Command
-  getter test_attribute : Bool = false
+# Default Command — a pure data record
+struct DummyCommand < ES::Command
+  def initialize(@aggregate_id : UUID = UUID.v7)
+  end
+end
 
-  def call
-    @test_attribute = true
+# Default Command Handler — generic over its command type
+class DummyCommandHandler < ES::CommandHandler(DummyCommand)
+  getter handled : Bool = false
+
+  def handle(command : DummyCommand)
+    @handled = true
+  end
+end
+
+# Default Reactor — reacts to an event by recording the invocation
+class DummyReactor < ES::Reactor
+  reacts_to DummyEvent
+
+  class_property invocations : Int32 = 0
+
+  def call(event : DummyEvent)
+    DummyReactor.invocations += 1
   end
 end

@@ -4,7 +4,7 @@ module ES
 
     class_property version : String = "unknown"
 
-    def event_bus=(param : ES::EventBus(ES::Command.class | ES::Projection.class))
+    def event_bus=(param : ES::EventBus(ES::Reactor.class | ES::Projection.class))
       @@eventbus = param
     end
 

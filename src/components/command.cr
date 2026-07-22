@@ -1,37 +1,15 @@
 module ES
-  abstract class Command
-    abstract def call
+  # A Command is a pure data record expressing an intent to change state.
+  #
+  # Following strict event sourcing, a Command carries only the target
+  # aggregate and its payload — it has no behavior. The business logic that
+  # validates a command, hydrates the aggregate and appends events lives in
+  # ES::CommandHandler.
+  abstract struct Command
+    # Target aggregate the command intends to act upon
+    getter aggregate_id : UUID
 
-    @aggregate_id : UUID
-    @trigger_event : ES::Event?
-
-    # Initialize with a random aggregate ID
-    def initialize(
-      @event_store : ES::EventStore = ES::Config.event_store,
-      @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
-    )
-      @aggregate_id = UUID.v7
-    end
-
-    # Initialize with a provided aggregate ID
-    def initialize(
-      @aggregate_id : UUID,
-      @event_store : ES::EventStore = ES::Config.event_store,
-      @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
-    )
-    end
-
-    # Execute command with trigger event parameter
-    def call(event : ES::Event)
-      @aggregate_id = event.header.aggregate_id
-      @trigger_event = event
-
-      call
-    end
-
-    # Placeholder for subclasses
-    def call
-      raise ES::Exception::NotImplemented.new("The command class does not properly implement the call() function")
+    def initialize(@aggregate_id : UUID)
     end
   end
 end
