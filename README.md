@@ -136,12 +136,10 @@ PlaceOrderHandler.new.handle(PlaceOrder.new(aggregate_id: id, amount: 500_i64))
 
 ### Reactor
 
-`ES::Reactor` consumes events from the `EventBus` and reacts to them — typically by constructing a command and calling its handler directly. It is the one bridge from an event back to a command; each step of a workflow is a named reactor. Declare the event it listens to with `reacts_to`:
+`ES::Reactor` consumes events from the `EventBus` and reacts to them — typically by constructing a command and calling its handler directly. It is the one bridge from an event back to a command; each step of a workflow is a named reactor. Declare the events it handles by defining a typed `call` for each, the same way a projection declares its events with typed `apply` overloads:
 
 ```crystal
 class OnOrderPlaced < ES::Reactor
-  reacts_to OrderPlaced
-
   def call(event : OrderPlaced)
     ReserveStockHandler.new(event_store: @event_store).handle(
       ReserveStock.new(aggregate_id: event.header.aggregate_id)
@@ -149,6 +147,10 @@ class OnOrderPlaced < ES::Reactor
   end
 end
 ```
+
+A reactor may declare several events by defining one `call` per event. Routing itself stays in the `EventBus` wiring, so the full fan-out of an event across workflows is readable in a single place; `subscribe` checks this declaration and refuses a subscription the reactor cannot serve.
+
+Reaching a reactor with an event it declares no `call` for raises `ES::Exception::InvalidState`. A projection may legitimately ignore an event, but a reactor doing so means a workflow step was silently dropped.
 
 ---
 
@@ -161,16 +163,22 @@ end
 `define_projection` generates the full projection class — table creation, column definitions, index setup, and event handlers — from a concise block.
 
 ```crystal
-define_projection("ledger", "postings") do
-  column :id,         UUID,   primary_key: true
-  column :account_id, UUID
-  column :amount,     Int64
-  column :posted_at,  Time
+class Postings < ES::Projection
+  include ES::ProjectionDSL
 
-  index [:account_id]
-  index [:id], unique: true
+  define_projection "ledger.postings" do
+    column :id,         UUID, primary_key: true
+    column :account_id, UUID
+    column :amount,     Int64
+    column :posted_at,  Time
 
-  apply(OrderPlaced) do |event|
+    index [:account_id]
+    index [:id], unique: true
+  end
+
+  # Event handlers are declared on the class, not inside the block —
+  # `define_projection` reads only `column` and `index` declarations.
+  apply(OrderPlaced) do
     # insert into postings table
   end
 end
@@ -188,7 +196,9 @@ end
 
 **`index(columns, unique: false, name: nil)`** — add an index to the projection table.
 
-**`apply(EventClass) { |event| ... }`** — handle an event to update the read model.
+**`apply(EventClass) { ... }`** — handle an event to update the read model. Declared on the class body, alongside `define_projection` rather than inside it. Within the block, `header`, `aggregate_id`, `aggregate_version`, `created_at` and `body` are pre-bound. A plain `def apply(event : EventClass)` works identically.
+
+A projection consumes only the events it declares an `apply` for; `EventBus#subscribe` rejects a subscription to any other event. To consume everything, override the catch-all `apply(event : ES::Event)` instead.
 
 #### Schema Drift Detection
 
@@ -231,11 +241,19 @@ status = Ledger.drift_status(db)
 `ES::EventBus` fans out published events to all registered subscribers (reactors and projections). It never runs business logic itself and never touches a command handler — reactors reach handlers by a direct call.
 
 ```crystal
-bus = ES::EventBus(ES::Reactor | ES::Projection).new
+bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
 bus.subscribe(OrderPlaced, OnOrderPlaced)     # a reactor
 bus.subscribe(OrderPlaced, OrdersProjection)  # a projection
 
 bus.publish(event)
+```
+
+This wiring is the single place where workflows are defined — one event may fan out to many handlers, and that fan-out is visible nowhere else. `subscribe` raises `ES::Exception::InvalidState` if the handler declares no `call`/`apply` for the event, so a wiring mistake surfaces at boot rather than as a silently swallowed event.
+
+`bus.routes` returns the full routing table when the wiring file has grown long:
+
+```crystal
+bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 ```
 
 ---
@@ -266,7 +284,7 @@ bus.publish(event)
 ES::Config.configure do |c|
   c.event_store = ES::Adapters::EventStores::Postgres.new(db)
   c.queue       = ES::Adapters::Queues::Postgres.new(db)
-  c.event_bus   = ES::EventBus(ES::Reactor | ES::Projection).new
+  c.event_bus   = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
 end
 ```
 
@@ -380,8 +398,6 @@ The reactor turns an incoming event into the next command. This is where the wor
 ```crystal
 # reactors/on_transaction_initiated.cr
 class OnTransactionInitiated < ES::Reactor
-  reacts_to TransactionInitiated
-
   def call(event : TransactionInitiated)
     ProcessTransactionHandler.new(event_store: @event_store).handle(
       ProcessTransaction.new(aggregate_id: event.header.aggregate_id)
@@ -442,7 +458,7 @@ db = DB.open(ENV["DATABASE_URL"])
 ES::Config.configure do |c|
   c.event_store    = ES::Adapters::EventStores::Postgres.new(db)
   c.queue          = ES::Adapters::Queues::Postgres.new(db)
-  c.event_bus      = ES::EventBus(ES::Reactor | ES::Projection).new
+  c.event_bus      = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
   c.event_handlers = ES::EventHandlers.new
 end
 

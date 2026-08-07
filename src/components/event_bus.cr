@@ -27,18 +27,32 @@ module ES
       end
     end
 
-    # Subscribe a single event handler to an event
+    # Subscribe a single event handler to an event.
+    #
+    # The handler must declare it can consume the event — a projection by an
+    # `apply` overload, a reactor by a typed `call`. Wiring an event to a handler
+    # that cannot serve it would otherwise fail silently (the projection catch-all
+    # swallows it) or at runtime mid-fan-out, so it is rejected here instead.
     def subscribe(event_class : ES::Event.class, handler : T)
+      if !handler.handles?(event_class)
+        raise ES::Exception::InvalidState.new(
+          "'#{handler.name}' cannot be subscribed to '#{event_class.name}': it declares no handler for that event"
+        )
+      end
+
       if !@subscriptions.has_key?(event_class)
         @subscriptions[event_class] = Array(T).new
       end
 
       s = @subscriptions[event_class]
-      s.push(handler)
+      s.push(handler) unless s.includes?(handler)
+      s
     end
 
     # Check if handler is subscribed to event
     def subscribed?(event_class : ES::Event.class, handler : T)
+      return false if !@subscriptions.has_key?(event_class)
+
       @subscriptions[event_class].includes?(handler)
     end
 
@@ -48,6 +62,12 @@ module ES
 
       s = @subscriptions[event_class]
       s.delete(handler)
+    end
+
+    # The full routing table: which handlers each event fans out to. Useful when
+    # a single event drives many workflows and the wiring file has grown long.
+    def routes : Hash(ES::Event.class, Array(T))
+      @subscriptions.transform_values(&.dup)
     end
   end
 end

@@ -279,3 +279,38 @@ describe ES::ProjectionMeta do
     end
   end
 end
+
+# `column`/`index` declarations carrying no options at all: the AST node exposes
+# `named_args` as Nop rather than an empty list, which used to abort compilation.
+class ProjectionDSLNoOptions < ES::Projection
+  include ES::ProjectionDSL
+
+  define_projection "projections.no_options" do
+    column :id, UUID, primary_key: true
+    column :account_id, UUID
+    column :amount, Int64
+
+    index [:account_id]
+  end
+end
+
+describe "ES::ProjectionDSL with option-less declarations" do
+  it "compiles a column declared without any options" do
+    parsed = JSON.parse(ProjectionDSLNoOptions.compiled_definition)
+    cols = parsed["columns"].as_a
+
+    cols.map(&.["name"].as_s).should eq(["id", "account_id", "amount"])
+    cols[1]["sql_type"].as_s.should eq("UUID")
+    cols[1]["primary_key"].as_bool.should be_false
+    cols[1]["null"].as_bool.should be_false
+  end
+
+  it "compiles an index declared without any options" do
+    parsed = JSON.parse(ProjectionDSLNoOptions.compiled_definition)
+    idxs = parsed["indexes"].as_a
+
+    idxs.size.should eq(1)
+    idxs[0]["unique"].as_bool.should be_false
+    idxs[0]["name"].as_s.should eq("no_options_account_id_idx")
+  end
+end
