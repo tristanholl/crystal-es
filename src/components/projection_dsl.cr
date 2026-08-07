@@ -58,7 +58,7 @@ module ES
                   {% is_null = false %}
                   {% has_default = false %}
                   {% default_val = nil %}
-                  {% for col_opt in col_def.named_args %}
+                  {% for col_opt in (col_def.named_args.is_a?(Nop) ? [] of Nil : col_def.named_args) %}
                     {% if col_opt.name.stringify == "primary_key" %}{% is_primary = col_opt.value %}{% end %}
                     {% if col_opt.name.stringify == "serial" %}{% is_serial = col_opt.value %}{% end %}
                     {% if col_opt.name.stringify == "bigserial" %}{% is_bigserial = col_opt.value %}{% end %}
@@ -110,7 +110,7 @@ module ES
                   {% idx_cols = idx_def.args[0] %}
                   {% is_unique = false %}
                   {% idx_name = nil %}
-                  {% for idx_opt in idx_def.named_args %}
+                  {% for idx_opt in (idx_def.named_args.is_a?(Nop) ? [] of Nil : idx_def.named_args) %}
                     {% if idx_opt.name.stringify == "unique" %}{% is_unique = idx_opt.value %}{% end %}
                     {% if idx_opt.name.stringify == "name" %}{% idx_name = idx_opt.value %}{% end %}
                   {% end %}
@@ -182,7 +182,7 @@ module ES
               {% is_null = false %}
               {% has_default = false %}
               {% default_val = nil %}
-              {% for col_opt in col_def.named_args %}
+              {% for col_opt in (col_def.named_args.is_a?(Nop) ? [] of Nil : col_def.named_args) %}
                 {% if col_opt.name.stringify == "primary_key" %}{% is_primary = col_opt.value %}{% end %}
                 {% if col_opt.name.stringify == "serial" %}{% is_serial = col_opt.value %}{% end %}
                 {% if col_opt.name.stringify == "bigserial" %}{% is_bigserial = col_opt.value %}{% end %}
@@ -221,7 +221,7 @@ module ES
           {% idx_cols = idx_def.args[0] %}
           {% is_unique = false %}
           {% idx_name = nil %}
-          {% for idx_opt in idx_def.named_args %}
+          {% for idx_opt in (idx_def.named_args.is_a?(Nop) ? [] of Nil : idx_def.named_args) %}
             {% if idx_opt.name.stringify == "unique" %}{% is_unique = idx_opt.value %}{% end %}
             {% if idx_opt.name.stringify == "name" %}{% idx_name = idx_opt.value %}{% end %}
           {% end %}

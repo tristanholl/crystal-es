@@ -66,11 +66,55 @@ end
 
 # Default Reactor — reacts to an event by recording the invocation
 class DummyReactor < ES::Reactor
-  reacts_to DummyEvent
-
   class_property invocations : Int32 = 0
 
   def call(event : DummyEvent)
     DummyReactor.invocations += 1
+  end
+end
+
+# A second event, used to exercise multi-event reactors and subscription checks
+class OtherDummyEvent < ES::Event
+  @@aggregate = "Test"
+  @@handle = "other_dummy"
+
+  struct Body < ES::Event::Body
+    include JSON::Serializable
+
+    def initialize(@comment)
+    end
+  end
+
+  def initialize(
+    @header : ES::Event::Header,
+    body : JSON::Any,
+  )
+    @body = Body.from_json(body.to_json)
+  end
+
+  def initialize
+    @header = Header.new(
+      actor_id: UUID.v7,
+      aggregate_id: UUID.v7,
+      aggregate_type: "Test",
+      aggregate_version: 1,
+      command_handler: "test",
+      event_handle: @@handle
+    )
+    @body = Body.new("comment")
+  end
+end
+
+# A reactor handling two events — impossible with the previous `reacts_to` macro,
+# which redefined the erased entry point on each call
+class MultiEventReactor < ES::Reactor
+  class_property seen : Array(String) = [] of String
+
+  def call(event : DummyEvent)
+    MultiEventReactor.seen << "DummyEvent"
+  end
+
+  def call(event : OtherDummyEvent)
+    MultiEventReactor.seen << "OtherDummyEvent"
   end
 end

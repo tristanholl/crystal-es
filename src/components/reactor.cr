@@ -3,13 +3,11 @@ module ES
   # constructing a Command and calling its CommandHandler directly. It is the one
   # bridge from an event back to a command — each workflow step is a named Reactor.
   #
-  # Declare the event a reactor listens to with `reacts_to`, then implement a
-  # typed `call` for it:
+  # A reactor declares the events it handles by defining a typed `call` for each,
+  # exactly as a Projection declares its events with typed `apply` overloads:
   #
   # ```
   # class OnOrderPlaced < ES::Reactor
-  #   reacts_to OrderPlaced
-  #
   #   def call(event : OrderPlaced)
   #     ReserveStockHandler.new(event_store: @event_store).handle(
   #       ReserveStock.new(aggregate_id: event.header.aggregate_id)
@@ -17,22 +15,53 @@ module ES
   #   end
   # end
   # ```
+  #
+  # Routing stays in one place — the EventBus wiring — so the full fan-out of an
+  # event across workflows is readable in a single file. `EventBus#subscribe`
+  # checks this declaration and refuses a subscription the reactor cannot serve,
+  # turning a wiring mistake into a startup error.
   abstract class Reactor
+    # Generates `self.handles?` from the typed `call` overloads the subclass defines.
+    macro inherited
+      macro finished
+        # Returns whether this reactor declares a `call` overload for `event_class`.
+        def self.handles?(event_class : ::ES::Event.class) : Bool
+          \{% for m in @type.methods.select { |x| x.name.stringify == "call" && x.args.size == 1 } %}
+            \{% r = m.args[0].restriction %}
+            \{% if r.nil? %}
+              return true
+            \{% elsif r.resolve? && r.resolve? <= ::ES::Event %}
+              \{% if r.resolve? == ::ES::Event %}
+                return true
+              \{% else %}
+                return true if event_class <= \{{r}}
+              \{% end %}
+            \{% end %}
+          \{% end %}
+          false
+        end
+      end
+    end
+
     def initialize(
       @event_store : ES::EventStore = ES::Config.event_store,
       @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
     )
     end
 
-    # Entry point invoked by the EventBus with the published event.
-    abstract def call(event : ES::Event)
+    # Overridden per subclass by the `inherited` hook above.
+    def self.handles?(event_class : ::ES::Event.class) : Bool
+      false
+    end
 
-    # Bridges the erased event handed over by the EventBus to the typed `call`
-    # the reactor implements. Safe because the bus only delivers subscribed events.
-    macro reacts_to(event_type)
-      def call(event : ES::Event)
-        call(event.as({{event_type}}))
-      end
+    # Catch-all for events the reactor declares no typed `call` for. Unlike a
+    # projection — which may legitimately ignore an event — a reactor reaching
+    # this method means a workflow step was dropped, so it raises rather than
+    # failing silently. `EventBus#subscribe` normally prevents this at boot.
+    def call(event : ES::Event)
+      raise ES::Exception::InvalidState.new(
+        "'#{self.class.name}' received '#{event.class.name}' but declares no `call` overload for it"
+      )
     end
   end
 end
