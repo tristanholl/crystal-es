@@ -34,11 +34,7 @@ module ES
     # that cannot serve it would otherwise fail silently (the projection catch-all
     # swallows it) or at runtime mid-fan-out, so it is rejected here instead.
     def subscribe(event_class : ES::Event.class, handler : T)
-      if !handler.handles?(event_class)
-        raise ES::Exception::InvalidState.new(
-          "'#{handler.name}' cannot be subscribed to '#{event_class.name}': it declares no handler for that event"
-        )
-      end
+      raise ES::Exception::InvalidState.new("'#{handler.name}' cannot be subscribed to '#{event_class.name}': it declares no handler for that event") if !handler.handles?(event_class)
 
       if !@subscriptions.has_key?(event_class)
         @subscriptions[event_class] = Array(T).new
