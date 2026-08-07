@@ -21,25 +21,12 @@ module ES
   # checks this declaration and refuses a subscription the reactor cannot serve,
   # turning a wiring mistake into a startup error.
   abstract class Reactor
-    # Generates `self.handles?` from the typed `call` overloads the subclass defines.
+    include ES::EventDeclaration
+
+    # A reactor declares the events it consumes with typed `call` overloads.
     macro inherited
       macro finished
-        # Returns whether this reactor declares a `call` overload for `event_class`.
-        def self.handles?(event_class : ::ES::Event.class) : Bool
-          \{% for m in @type.methods.select { |x| x.name.stringify == "call" && x.args.size == 1 } %}
-            \{% r = m.args[0].restriction %}
-            \{% if r.nil? %}
-              return true
-            \{% elsif r.resolve? && r.resolve? <= ::ES::Event %}
-              \{% if r.resolve? == ::ES::Event %}
-                return true
-              \{% else %}
-                return true if event_class <= \{{r}}
-              \{% end %}
-            \{% end %}
-          \{% end %}
-          false
-        end
+        define_handles?("call")
       end
     end
 
@@ -47,11 +34,6 @@ module ES
       @event_store : ES::EventStore = ES::Config.event_store,
       @event_handlers : ES::EventHandlers = ES::Config.event_handlers,
     )
-    end
-
-    # Overridden per subclass by the `inherited` hook above.
-    def self.handles?(event_class : ::ES::Event.class) : Bool
-      false
     end
 
     # Catch-all for events the reactor declares no typed `call` for. Unlike a
