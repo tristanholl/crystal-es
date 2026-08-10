@@ -11,6 +11,7 @@ module ES
         return true if skip
 
         m = Array(String).new
+        m << %( CREATE SCHEMA IF NOT EXISTS "pgmq"; )
         m << %( CREATE EXTENSION pgmq cascade; )
         m << %( DROP TRIGGER IF EXISTS "queue_event_#{@name}" ON "eventstore"."events"; )
         m << %( DROP FUNCTION IF EXISTS "eventstore"."queue_event_#{@name}" CASCADE; )
