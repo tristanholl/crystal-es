@@ -58,6 +58,28 @@ which must be keyed by that customer so erasing them erases the right thing.
 Because the key is known at construction, the header carries it from the start and
 `ES::Event::Header` stays immutable — no setter, no mutation during `append`.
 
+### Encryption is opt-in per application, and fails loud rather than silent
+
+Declaring `encrypted: true` is a class-level flag. It has no dependency on
+`ES::Config.encryption` being set, so an application that never configures
+encryption can ship such an event class with zero effect on anything else —
+plain events keep working exactly as before, and there is no global switch that
+must be flipped for the rest of the library to function.
+
+The guarantee that makes this safe rather than merely convenient:
+`EventStore#encode_body` (`eventstore.cr`) checks `event.class.encrypted?`
+whenever `@encryption` is `nil` and raises `ES::Exception::InvalidState` rather
+than falling through to `event.body.to_json`. An application can therefore mix
+encrypted and unencrypted event types freely; the only way to hit a problem is
+to actually construct and append an encrypted event without wiring up
+`ES::EncryptionKeyManager` on that store, and that fails immediately and
+explicitly rather than persisting plaintext under what looks like an encrypted
+body. The same shape holds on the read side (`DependencyUnavailable` for an
+unconfigured store meeting an envelope) and for a configured store referencing
+a key that was never created or has been destroyed (`NotFound` from the key
+store) — every failure mode here is a raised exception, never a silent
+downgrade to plaintext or a decode of garbage.
+
 ### References run one way
 
 An event header points at a key. The key table points at nothing.

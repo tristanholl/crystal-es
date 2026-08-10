@@ -103,6 +103,22 @@ describe "encrypted events in an event store" do
     store.fetch_event(event.header.event_id).body["secret"].as_s.should eq("plain")
   end
 
+  it "lets an application that never configures encryption use the rest of the library normally, even with an encrypted: true event class in the same codebase" do
+    store = ES::EventStoreAdapters::InMemory.new
+
+    # EncryptedEvent (see spec_helper.cr) declares `encrypted: true` — its mere
+    # existence in the codebase has no bearing on a store with no encryption
+    # configured, as long as nothing ever tries to append one.
+    store.append(PlainEvent.new(actor_id: nil, command_handler: "handler", secret: "unaffected"))
+    store.fetch_event(store.last_event_id.not_nil!).body["secret"].as_s.should eq("unaffected")
+
+    # The moment such an event is actually appended, the failure is loud and
+    # immediate — never a silent plaintext write under an encrypted-looking body.
+    expect_raises(ES::Exception::InvalidState) do
+      store.append(EncryptedEvent.new(actor_id: nil, command_handler: "handler", encryption_key_id: UUID.v7, secret: "secret"))
+    end
+  end
+
   describe "after the key is destroyed" do
     it "raises NotFound on read — the deletion is the erasure, nothing else signals it" do
       encryption = test_encryption
