@@ -6,7 +6,7 @@ module ES
       # Initialize with an optional queue adapter and payload encryption
       def initialize(
         @queue : ES::QueueAdapters::InMemory? = nil,
-        @encryption : ES::Encryption? = ES::Config.encryption?,
+        @encryption : ES::EncryptionKeyManager? = ES::Config.encryption?,
       )
       end
 

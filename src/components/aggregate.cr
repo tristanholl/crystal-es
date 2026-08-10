@@ -44,11 +44,6 @@ module ES
     # never has to configure a global just to exist.
     @event_handlers : ES::EventHandlers? = nil
 
-    # Whether a hole in the stream left by an erasure is tolerated. Off by default:
-    # rebuilding state from events you cannot read is a correctness problem, not a
-    # degraded read, so it has to be asked for.
-    @skip_shredded_events = false
-
     # Returns the aggregate type on class level
     def self.type
       @@type
@@ -60,7 +55,6 @@ module ES
     def initialize(
       @event_store : ES::EventStore = ES::Config.event_store,
       @reject_unhandled_events = true,
-      @skip_shredded_events = false,
       @event_handlers : ES::EventHandlers? = nil,
     )
     end
@@ -77,15 +71,6 @@ module ES
     )
       h = ES::Event::Header.from_json(event.header.to_json)
       return if h.aggregate_version > up_to_version
-
-      if event.shredded?
-        raise ES::Exception::KeyDestroyed.new("Aggregate '#{@state.aggregate_id}' cannot be hydrated: the encryption key for event '#{h.event_id}' was destroyed") unless @skip_shredded_events
-
-        # The event is unreadable but it still happened, so the version has to move
-        # or every later event in the stream looks out of order.
-        @state.increase_version(h.aggregate_version)
-        return
-      end
 
       apply(event_handlers.materialize(event, h))
     end

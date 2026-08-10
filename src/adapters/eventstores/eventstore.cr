@@ -14,32 +14,23 @@ module ES
     # references run one way only, from an event header to a key.
     #
     # ```
-    # store.encryption_key_ids(aggregate_id).each { |id| encryption.destroy_key(id) }
+    # store.encryption_key_ids(aggregate_id).each { |id| key_manager.destroy_key(id) }
     # ```
     #
     # A subject whose data spans several aggregates is the application's to map — it
     # holds the key id on its own record and calls `destroy_key` directly.
     abstract def encryption_key_ids(aggregate_id : UUID) : Array(UUID)
 
-    @encryption : ES::Encryption? = nil
+    @encryption : ES::EncryptionKeyManager? = nil
 
     struct Event
       getter header : JSON::Any
       getter body : JSON::Any
 
-      # Whether this event's key was destroyed, making the body permanently
-      # unreadable. The body is then empty.
-      #
-      # Reported rather than raised because the right response differs by caller:
-      # `ES::Aggregate#hydrate` treats a hole in its stream as a correctness problem,
-      # while `ES::Projection#replay` must stay able to rebuild after an erasure.
-      getter? shredded : Bool
-
       # Initialize Event with header and body
       def initialize(
         @header : JSON::Any,
         @body : JSON::Any,
-        @shredded : Bool = false,
       )
       end
     end
@@ -60,15 +51,15 @@ module ES
 
     # Turns a stored row into an event, decrypting the body when it is an envelope.
     # A store always hands back plaintext, so nothing downstream has to know that
-    # encryption exists.
+    # encryption exists. If the key was destroyed, `ES::Exception::NotFound` raises
+    # straight through — the same as any other missing row.
     protected def decode(header : JSON::Any, body : JSON::Any) : ES::EventStore::Event
-      return ES::EventStore::Event.new(header, body) unless ES::Encryption.envelope?(body)
+      return ES::EventStore::Event.new(header, body) unless ES::EncryptionKeyManager.envelope?(body)
 
       encryption = @encryption
       raise ES::Exception::DependencyUnavailable.new("Event body is encrypted but this event store has no encryption configured") if encryption.nil?
 
-      plaintext, shredded = encryption.open(body, ES::Event::Header.from_json(header.to_json))
-      ES::EventStore::Event.new(header, plaintext, shredded)
+      ES::EventStore::Event.new(header, encryption.open(body, ES::Event::Header.from_json(header.to_json)))
     end
   end
 end

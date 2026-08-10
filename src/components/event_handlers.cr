@@ -25,13 +25,7 @@ module ES
     #
     # Aggregates and projections both need this, so it lives here — the one place
     # that already knows how to get from a handle to a class.
-    #
-    # A shredded event has no body left to build from, so callers decide what to do
-    # about it *before* calling: an aggregate raises or bumps the version, a
-    # projection skips. Reaching here with one is a bug, hence the guard.
     def materialize(stored : ES::EventStore::Event, header : ES::Event::Header) : ES::Event
-      raise ES::Exception::KeyDestroyed.new("Event '#{header.event_id}' cannot be materialized: its encryption key was destroyed") if stored.shredded?
-
       event_class(header.event_handle).new(header, stored.body)
     end
 

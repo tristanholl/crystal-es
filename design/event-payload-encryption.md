@@ -1,20 +1,21 @@
 # Design: Event Payload Encryption
 
-Status: **implemented**. This records the reasoning; `README.md` documents the API.
+Status: **implemented**, deliberately scoped down for a first iteration. This records
+the reasoning; `README.md` documents the API.
 
 ## Goal
 
 Crypto-shredding. An event store is immutable, so once personal data lands in a body
 there is no way to erase it — which leaves an erasure request unanswerable short of
 rewriting history. Encrypting the body under a key that can be destroyed makes erasure
-a `DELETE` of 32 bytes instead.
+a `DELETE` of one row instead.
 
 Encryption at rest is the side effect, not the driver.
 
 ## Threat model
 
 **Protected:** event bodies in `eventstore.events` — dumps, backups, replicas, a DBA with
-`SELECT`, a stolen volume — and erasure by key destruction.
+`SELECT`, a stolen volume — and erasure by key deletion.
 
 **Not protected:** the event *header* (indexed, drives the flattened view, so it stays
 plaintext), application memory, logs, and **projections**. A projection built from an
@@ -25,12 +26,23 @@ store; read models are treated as temporary and rebuilt independently.
 
 ## Decisions
 
-### Whole body, whole shred
+### Whole body, whole erasure, no shredding machinery
 
-Not per-attribute. Anything that must survive an erasure — a retained financial record,
-an anonymised aggregate — is extracted by the application before the key goes. Field-level
-encryption would keep some JSONB queryable, at the cost of a per-field envelope and a much
-larger surface; it can be added later without changing the storage format.
+Not per-attribute, and not softened by a tombstone or a "shredded" signal. A destroyed
+key is a real `DELETE FROM encryption_keys WHERE id = $1`. Reading a body that names a
+deleted key raises `ES::Exception::NotFound` — the same exception a missing event row
+would raise. No new exception type, no `destroyed_at`, no `EventStore::Event#shredded?`.
+
+The deletion is the answer. Anything that must survive an erasure — a retained financial
+record, an anonymised aggregate — is extracted by the application before the key goes,
+and an application that wants a projection replay to keep going past an erasure rescues
+`NotFound` around it. The library does not build that in.
+
+This was a deliberate simplification from an earlier pass, which had rotation, a
+tombstone-based destroy, and a `shredded?` signal threaded through `Aggregate#hydrate`
+and `Projection#replay` with an opt-in `skip_shredded_events` flag. Reasonable, but more
+than a first iteration needed, and the maintainer's call was to cut it: "the deletion
+should be good enough."
 
 ### The key is chosen at construction
 
@@ -58,21 +70,14 @@ The alternative — a `scope` column on the key table — is more convenient and
 it would put domain identifiers, themselves frequently personal data, directly beside the
 keys protecting them.
 
-### A destroyed key is reported, not raised on
+### Symmetric, not asymmetric
 
-`ES::EventStore::Event#shredded?`. The adapters decrypt, so a store always hands back a
-plaintext body, but a shredded event must not blow up `fetch_events` — because the right
-response differs by caller:
-
-| Caller | Behaviour | Why |
-|---|---|---|
-| `Aggregate#hydrate` | raise | Rebuilding state from events you cannot read is a correctness bug, not a degraded read. |
-| `Aggregate#hydrate(skip_shredded_events: true)` | bump version, continue | An order whose customer was erased should still hydrate — but you opt into the incomplete state. |
-| `Projection#replay` / `#init` | skip | Read models must stay rebuildable *after* an erasure, or one request breaks every future replay. |
-
-A key row that is **missing entirely** raises instead: that means the store is pointed at
-the wrong database, not that anything was erased. Distinguishing the two is why `destroy`
-nulls the material and keeps a tombstone rather than deleting the row.
+An earlier sketch of the key table used `"encryption_algorithm": "ES256"`. ES256 is
+ECDSA — a *signing* algorithm, not an encryption one, so it could not have done this job
+regardless of preference. Asymmetric encryption (ECIES, RSA-OAEP) earns its cost only
+when the party encrypting shouldn't be able to decrypt; here the same application does
+both, so there's no separation of duty to protect. AES-256 stays, and
+`encryption_algorithm` records the real cipher name.
 
 ### Envelope inside the existing column
 
@@ -109,21 +114,30 @@ header. Without this, an envelope could be transplanted between two events shari
 and would decrypt cleanly. AAD would be the natural home for this, but no released Crystal
 exposes an AAD setter.
 
-### Application keys from the environment, several at once
+### One application key from the environment, identified by its own hash
 
-`ES::ApplicationKeyRing` reads `ES_APPLICATION_KEYS` / `ES_APPLICATION_KEY_CURRENT`.
-Holding several keys is what makes rotation possible: new data keys wrap under the current
-one, older ones still unwrap under the id recorded on their row, and `rewrap_all` migrates
-them without touching an event.
+`ES::ApplicationEncryptionKeyManager` reads a single raw base64 key from
+`APPLICATION_ENCRYPTION_KEYS`. `application_encryption_key_id` on each key row is
+`Digest::SHA256.hexdigest` of that key's bytes, not an operator-assigned name — so it's
+always correct for whatever key is actually loaded, and a key row wrapped under a
+different key on a misconfigured environment fails the id check in `unwrap` rather than
+decrypting into garbage.
 
-Data key rotation is deliberately not offered — it would mean rewriting the event store.
+No rotation. Changing the application key makes every existing data key unwrappable, so
+it is effectively fixed for the store's lifetime in this iteration. A ring holding
+several application keys at once — the natural way to support rotation without downtime
+— is a reasonable follow-up, deliberately deferred.
 
-### Caching
+Data key rotation is also not offered — it would mean rewriting the event store.
 
-Unwrapping per event would be a keystore round trip per event, and a network call once the
-ring is KMS-backed. Hydrating one aggregate hits the same key repeatedly, so `ES::Encryption`
-holds a bounded, oldest-first cache of unwrapped keys. The cost — plaintext key material in
-process memory — is the reason it is bounded and documented.
+### No cache
+
+Every `open`/`seal` does one `KeyStore#fetch` plus one symmetric unwrap. Without a cache,
+hydrating an aggregate with several events under the same key does one fetch per event
+rather than one per unique key — a real cost on long streams. Traded away for this
+iteration in the same simplification pass; it can be reintroduced later inside
+`EncryptionKeyManager#open`/`#seal` without changing the on-disk format or any public
+signature.
 
 ---
 
@@ -141,13 +155,12 @@ process memory — is the reason it is bounded and documented.
 
 ## Fixed along the way
 
-`ES::Aggregate#hydrate` never compiled. `aggregate.cr:65` referenced `@event_handlers`,
-declared only in a comment on line 40; Crystal typechecks only called methods and no spec
-exercised `hydrate`, so it went unnoticed. Any aggregate following the README — which does
-not show the parameter — would have failed to build. The registry is now a nilable ivar
-resolved lazily from `ES::Config`, so existing subclasses keep working either way, and
-`hydrate` has spec coverage.
+`ES::Aggregate#hydrate` never compiled. `aggregate.cr` referenced `@event_handlers`,
+declared only in a comment; Crystal typechecks only called methods and no spec exercised
+`hydrate`, so it went unnoticed. Any aggregate following the README — which does not show
+the parameter — would have failed to build. The registry is now a nilable ivar resolved
+lazily from `ES::Config`, so existing subclasses keep working either way, and `hydrate`
+has spec coverage.
 
-The stored-row-to-event conversion was also duplicated across `aggregate.cr` and two sites
-in `projection.cr`; it is now `ES::EventHandlers#materialize`, which is where the shredded
-guard lives.
+The stored-row-to-event conversion was also duplicated across `aggregate.cr` and two
+sites in `projection.cr`; it is now `ES::EventHandlers#materialize`.

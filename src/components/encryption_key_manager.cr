@@ -2,70 +2,54 @@ module ES
   # Envelope encryption for event bodies, with crypto-shredding as the point of it.
   #
   # A data encryption key (DEK) encrypts event bodies. The DEK itself is only ever
-  # stored wrapped under an application encryption key (KEK) held in
-  # `ES::ApplicationKeyRing`. Destroy the DEK and every body encrypted under it is
-  # unreadable for good — which is how an event store, immutable by construction,
-  # answers an erasure request. Encryption at rest is the side effect.
+  # stored wrapped under the application encryption key held in
+  # `ES::ApplicationEncryptionKeyManager`. Destroy the DEK's row and every body
+  # encrypted under it is unreadable for good — reading one raises the same
+  # `ES::Exception::NotFound` as any other missing row. That is how an event store,
+  # immutable by construction, answers an erasure request. Encryption at rest is
+  # the side effect.
   #
   # The key is chosen when the event is constructed, not derived from the event, so
   # one aggregate's events may sit under several keys — events carrying a customer's
   # data can be keyed by that customer even when the aggregate is an order.
   #
   # ```
-  # encryption = ES::Encryption.new(key_store, ES::ApplicationKeyRing.from_env)
-  # key_id = encryption.create_key
+  # key_manager = ES::EncryptionKeyManager.new(key_store, ES::ApplicationEncryptionKeyManager.from_env)
+  # key_id = key_manager.create_key
   #
   # store.append(CustomerRegistered.new(
   #   actor_id: actor, command_handler: "RegisterCustomer",
   #   encryption_key_id: key_id, name: "...", iban: "..."
   # ))
   #
-  # encryption.destroy_key(key_id) # the body is now gone
+  # key_manager.destroy_key(key_id) # the body is now gone
   # ```
-  class Encryption
+  class EncryptionKeyManager
     # Marks a body as an envelope rather than plaintext. Its presence is what lets
     # encrypted and plaintext bodies coexist in one store, so encryption can be
     # switched on for new events without rewriting a byte of history.
     ENVELOPE_MARKER = "__es"
     ENVELOPE_FORMAT = 1
 
-    # An unwrapped data key is expensive to obtain — a keystore round trip and, once
-    # the key ring is backed by a KMS, a network call. Hydrating one aggregate hits
-    # the same key repeatedly, so a cache is not optional. The cost is plaintext key
-    # material resident in process memory, bounded by this many entries and evicted
-    # oldest-first.
-    DEFAULT_CACHE_SIZE = 1024
-
-    @cache : Hash(UUID, Bytes) = Hash(UUID, Bytes).new
-
     def initialize(
       @key_store : ES::KeyStore,
-      @key_ring : ES::ApplicationKeyRing,
-      @cache_size : Int32 = DEFAULT_CACHE_SIZE,
+      @application_key : ES::ApplicationEncryptionKeyManager,
     )
     end
 
-    # Creates a new data encryption key, wrapped under the current application key,
-    # and returns the id to put on an event header
+    # Creates a new data encryption key, wrapped under the application key, and
+    # returns the id to put on an event header
     def create_key : UUID
       data_key = ES::PayloadCipher.random_key
-      application_encryption_key_id, wrapped = @key_ring.wrap(data_key)
+      wrapped = @application_key.wrap(data_key)
 
-      encryption_key_id = @key_store.create(wrapped, application_encryption_key_id, ES::PayloadCipher::ALGORITHM)
-      remember(encryption_key_id, data_key)
-      encryption_key_id
+      @key_store.create(wrapped, @application_key.key_id, ES::PayloadCipher::ALGORITHM)
     end
 
     # Destroys a data encryption key. Every event body encrypted under it becomes
     # permanently unreadable — this is the erasure, and it does not come back.
     def destroy_key(encryption_key_id : UUID)
       @key_store.destroy(encryption_key_id)
-      @cache.delete(encryption_key_id)
-    end
-
-    # Whether a key has been destroyed
-    def destroyed?(encryption_key_id : UUID) : Bool
-      @key_store.fetch(encryption_key_id).destroyed?
     end
 
     # Returns the body JSON to persist for an event: an envelope when the event
@@ -88,7 +72,8 @@ module ES
         io << "}"
       end
 
-      sealed = ES::PayloadCipher.seal(data_key(encryption_key_id), plaintext.to_slice)
+      key = @key_store.fetch(encryption_key_id)
+      sealed = ES::PayloadCipher.seal(@application_key.unwrap(key.application_encryption_key_id, key.encryption_private_key), plaintext.to_slice)
 
       JSON.build do |json|
         json.object do
@@ -102,15 +87,13 @@ module ES
       end
     end
 
-    # Returns the plaintext body for a stored one, alongside whether it was shredded.
+    # Returns the plaintext body for a stored one.
     #
-    # A destroyed key is reported rather than raised, because what to do about it
-    # differs by caller: hydrating an aggregate over a hole is a correctness problem,
-    # while a projection replay must simply carry on. A key row that is missing
-    # altogether is a different matter and does raise — that means the store is
-    # pointed at the wrong database, not that anything was erased.
-    def open(body : JSON::Any, header : ES::Event::Header) : {JSON::Any, Bool}
-      return {body, false} unless self.class.envelope?(body)
+    # A destroyed key has no row left, so `KeyStore#fetch` raises `NotFound` and
+    # that propagates as-is — the same exception any other missing row would raise.
+    # There is no separate "shredded" signal: the deletion is the answer.
+    def open(body : JSON::Any, header : ES::Event::Header) : JSON::Any
+      return body unless self.class.envelope?(body)
 
       encryption_key_id = header.encryption_key_id
       raise ES::Exception::InvalidEventStream.new("Event '#{header.event_id}' has an encrypted body but no encryption_key_id in its header") if encryption_key_id.nil?
@@ -119,7 +102,6 @@ module ES
       raise ES::Exception::InvalidEventStream.new("Event '#{header.event_id}' envelope names key '#{kid}' but its header names '#{encryption_key_id}'") if kid != encryption_key_id.to_s
 
       key = @key_store.fetch(encryption_key_id)
-      return {JSON::Any.new(Hash(String, JSON::Any).new), true} if key.destroyed?
 
       sealed = ES::PayloadCipher::Sealed.new(
         decode_field(body, "iv", header),
@@ -127,7 +109,7 @@ module ES
         decode_field(body, "tag", header),
       )
 
-      plaintext = JSON.parse(String.new(ES::PayloadCipher.open(unwrap(key), sealed)))
+      plaintext = JSON.parse(String.new(ES::PayloadCipher.open(@application_key.unwrap(key.application_encryption_key_id, key.encryption_private_key), sealed)))
 
       digest = plaintext["h"]?.try(&.as_s?)
       raise ES::Exception::InvalidEventStream.new("Event '#{header.event_id}' body was decrypted but is bound to a different event") if digest != binding_digest(header)
@@ -135,29 +117,7 @@ module ES
       inner = plaintext["b"]?
       raise ES::Exception::InvalidEventStream.new("Event '#{header.event_id}' body was decrypted but carries no payload") if inner.nil?
 
-      {inner, false}
-    end
-
-    # Re-wraps every live data key under the current application key.
-    #
-    # This is the whole payoff of holding the DEKs wrapped: rotating the application
-    # key touches only this table and leaves every event untouched. Rotating a data
-    # key is deliberately not offered — that would mean rewriting the event store.
-    def rewrap_all : Int32
-      rewrapped = 0
-      current = @key_ring.current_id
-
-      @key_store.each_live do |key|
-        next if key.application_encryption_key_id == current
-
-        data_key = @key_ring.unwrap(key.application_encryption_key_id, key.material)
-        application_encryption_key_id, wrapped = @key_ring.wrap(data_key)
-
-        @key_store.rewrap(key.encryption_key_id, wrapped, application_encryption_key_id)
-        rewrapped += 1
-      end
-
-      rewrapped
+      inner
     end
 
     # Whether a stored body is an envelope rather than plaintext
@@ -177,32 +137,6 @@ module ES
       Base64.decode(value)
     rescue Base64::Error
       raise ES::Exception::InvalidEventStream.new("Event '#{header.event_id}' envelope field '#{field}' is not valid base64")
-    end
-
-    private def data_key(encryption_key_id : UUID) : Bytes
-      cached = @cache[encryption_key_id]?
-      return cached unless cached.nil?
-
-      unwrap(@key_store.fetch(encryption_key_id))
-    end
-
-    private def unwrap(key : ES::KeyStore::Key) : Bytes
-      cached = @cache[key.encryption_key_id]?
-      return cached unless cached.nil?
-
-      data_key = @key_ring.unwrap(key.application_encryption_key_id, key.material)
-      remember(key.encryption_key_id, data_key)
-      data_key
-    end
-
-    private def remember(encryption_key_id : UUID, data_key : Bytes)
-      return if @cache_size <= 0
-
-      while @cache.size >= @cache_size
-        @cache.shift?
-      end
-
-      @cache[encryption_key_id] = data_key
     end
   end
 end
