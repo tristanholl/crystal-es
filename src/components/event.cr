@@ -62,7 +62,9 @@ module ES
     # Declared per event class rather than decided per call, so which events carry
     # protected data is greppable and visible in review. `define_event(encrypted:
     # true)` overrides this and makes `encryption_key_id` a required constructor
-    # argument, which is what stops a handler quietly writing plaintext.
+    # argument, which is what stops a handler quietly writing plaintext. An
+    # undeclared event's constructor has no `encryption_key_id` parameter at all,
+    # so passing one there is a compile error rather than a per-instance opt-in.
     def self.encrypted? : Bool
       false
     end

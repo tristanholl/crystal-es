@@ -58,15 +58,10 @@ describe ES::EventDSL do
     e.header.encryption_key_id.should be_nil
   end
 
-  it "Lets an undeclared event opt into a key per instance" do
-    key_id = UUID.v7
-    e = EventDSLTestEvent2.new(
-      actor_id: nil, command_handler: "handler",
-      field1: "field1", encryption_key_id: key_id
-    )
+  # An undeclared event's constructor has no `encryption_key_id` parameter at all,
+  # so `EventDSLTestEvent2.new(..., encryption_key_id: key_id)` is a compile error.
+  # That, too, can only be shown by its absence here rather than as a runtime spec.
 
-    e.header.encryption_key_id.should eq(key_id)
-  end
   it "Creates event without fields" do
     e = EventDSLTestEvent.new(actor_id: nil, command_handler: "handler", comment: "test")
     e.body.comment.should eq("test")
