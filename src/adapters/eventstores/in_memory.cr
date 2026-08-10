@@ -38,7 +38,9 @@ module ES
         end
 
         @events.each do |event_id, event|
-          block.call(decode(event.header, event.body))
+          if es_event = decode_or_skip(event.header, event.body)
+            block.call(es_event)
+          end
           break if event_id == until_event_id
         end
       end

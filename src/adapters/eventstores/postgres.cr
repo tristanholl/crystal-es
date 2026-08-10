@@ -89,7 +89,9 @@ module ES
           break if rows.empty?
 
           rows.each do |id, header, body|
-            block.call(decode(header, body))
+            if es_event = decode_or_skip(header, body)
+              block.call(es_event)
+            end
             cursor = id
           end
 

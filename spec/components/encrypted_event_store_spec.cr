@@ -136,6 +136,30 @@ describe "encrypted events in an event store" do
         store.fetch_event(event.header.event_id)
       end
     end
+
+    it "each_event skips it and keeps streaming the rest, rather than raising" do
+      encryption = test_encryption
+      store = ES::EventStoreAdapters::InMemory.new(encryption: encryption)
+
+      erased_key = encryption.create_key
+      erased = EncryptedEvent.new(
+        actor_id: nil, command_handler: "handler",
+        encryption_key_id: erased_key, secret: "to be erased"
+      )
+      kept = EncryptedEvent.new(
+        actor_id: nil, command_handler: "handler",
+        encryption_key_id: encryption.create_key, secret: "still readable"
+      )
+      store.append(erased)
+      store.append(kept)
+
+      encryption.destroy_key(erased_key)
+
+      streamed = [] of String
+      store.each_event { |e| streamed << e.body["secret"].as_s }
+
+      streamed.should eq(["still readable"])
+    end
   end
 
   describe "#encryption_key_ids" do
