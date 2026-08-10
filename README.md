@@ -341,6 +341,31 @@ key_id = ES::Config.encryption.create_key
 Appending a declared-encrypted event to a store with no encryption configured raises,
 rather than quietly writing plaintext.
 
+#### Encryption is opt-in per application
+
+Nothing about the library requires an application to configure encryption at all.
+Declaring `encrypted: true` on an event class costs nothing by itself — it's a
+class-level flag, not a dependency on `ES::Config.encryption` — so an application
+that never touches payload encryption can define, ship, and never construct such
+an event without any effect on the rest of the library.
+
+What the library guarantees instead is that the failure mode is always loud, never
+silent:
+
+- **No encryption configured, and an encrypted event is appended** — raises
+  `ES::Exception::InvalidState` rather than persisting plaintext under a body that
+  looks encrypted.
+- **No encryption configured, and an encrypted envelope is read back** — raises
+  `ES::Exception::DependencyUnavailable`.
+- **Encryption is configured, but the referenced key doesn't exist** (never
+  created, destroyed, or from a different environment) — raises
+  `ES::Exception::NotFound` from the key store.
+
+In short: mixing encrypted and unencrypted event types in one codebase is fine
+even if the application as a whole never sets up encryption — you only pay for
+what you actually use, and using it without the matching configuration fails
+immediately instead of quietly writing something unencrypted or unreadable.
+
 #### Erasure
 
 ```crystal
