@@ -22,6 +22,10 @@ class MyEventStore < ES::EventStore
   def last_event_id : UUID?
     nil
   end
+
+  def encryption_key_ids(aggregate_id : UUID) : Array(UUID)
+    [] of UUID
+  end
 end
 
 describe ES::EventStore do

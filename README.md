@@ -276,6 +276,131 @@ bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 
 ---
 
+### Payload Encryption
+
+Event bodies can be encrypted at rest so that destroying one key erases the data
+under it — an event store is immutable, so a key you can destroy is the only way to
+answer an erasure request. Confidentiality at rest comes along for free.
+
+Three pieces:
+
+- **`ES::ApplicationKeyRing`** holds the application encryption keys (KEKs), read from
+  the environment. These are the only secrets you manage.
+- **`ES::KeyStore`** stores data encryption keys (DEKs), each wrapped under a KEK.
+  `ES::KeyStoreAdapters::Postgres` and `::InMemory` are provided. Deliberately not
+  event sourced — the whole point is that a row can be destroyed.
+- **`ES::Encryption`** ties them together and is handed to the event store.
+
+```crystal
+key_ring   = ES::ApplicationKeyRing.from_env
+key_store  = ES::KeyStoreAdapters::Postgres.new(db)
+key_store.setup
+
+ES::Config.encryption  = ES::Encryption.new(key_store, key_ring)
+ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
+```
+
+```
+ES_APPLICATION_KEYS="v1:<base64 32 bytes>,v2:<base64 32 bytes>"
+ES_APPLICATION_KEY_CURRENT="v2"
+```
+
+#### Declaring an encrypted event
+
+`encrypted: true` makes `encryption_key_id` a **required** constructor argument, so an
+event carrying protected data cannot be built without naming the key it will be sealed
+under:
+
+```crystal
+define_event("customer", "customer_registered", encrypted: true) do
+  attribute :name, String
+  attribute :iban, String
+end
+```
+
+The key is chosen when the event is constructed, not derived from it. That is what lets
+one aggregate's events sit under several keys — events carrying a customer's data can be
+keyed by that customer even when the aggregate is an order:
+
+```crystal
+key_id = ES::Config.encryption.create_key
+
+@event_store.append(CustomerRegistered.new(
+  actor_id: actor, command_handler: "RegisterCustomer",
+  encryption_key_id: key_id, name: name, iban: iban
+))
+```
+
+Appending a declared-encrypted event to a store with no encryption configured raises,
+rather than quietly writing plaintext.
+
+#### Erasure
+
+```crystal
+# Everything about one aggregate
+store.encryption_key_ids(aggregate_id).each { |id| ES::Config.encryption.destroy_key(id) }
+
+# Or a key the application tracked itself
+ES::Config.encryption.destroy_key(key_id)
+```
+
+The key table holds **no reference to any business entity** — references run one way
+only, from an event header to a key, so domain identifiers never accumulate next to the
+keys. The reverse lookup is `encryption_key_ids` for a single aggregate; a data subject
+spanning several aggregates is yours to map.
+
+Destroying a key nulls its material and leaves a tombstone row, which is what lets a
+reader tell a deliberate erasure from a key that was never there.
+
+#### Reading a shredded stream
+
+A destroyed key is reported rather than raised on, because the right response differs by
+caller:
+
+| Caller | Behaviour |
+|---|---|
+| `ES::Aggregate#hydrate` | raises `ES::Exception::KeyDestroyed` |
+| `ES::Aggregate#hydrate` with `skip_shredded_events: true` | bumps the version, rebuilds from what is left |
+| `ES::Projection#replay` / `#init` | skips the event, so read models stay rebuildable after an erasure |
+
+`ES::EventStore::Event#shredded?` exposes this if you read the store directly.
+
+#### What this does and does not protect
+
+Protected: event bodies at rest — dumps, backups, replicas, a DBA with `SELECT` — and
+erasure by key destruction.
+
+Not protected: the event *header* (it is indexed and drives the flattened view, so it
+stays plaintext), application memory, logs, and **projections**. A projection built from
+an encrypted event stores whatever it extracted in the clear; encryption stops at the
+event store, and purging or rebuilding read models after an erasure is the application's
+job.
+
+#### Rotation, and what is not offered
+
+Rotating the application key re-wraps the data keys and touches no events:
+
+```crystal
+ES::Config.encryption.rewrap_all
+```
+
+Rotating a *data* key is deliberately absent — it would mean re-encrypting stored bodies,
+which is a rewrite of the event store. Since the key id lives per event in the header, new
+events simply start using a new key.
+
+#### Notes
+
+Bodies are sealed with AES-256-CBC and an encrypt-then-MAC HMAC-SHA256 tag. AES-GCM would
+be the obvious choice, but Crystal's `OpenSSL::Cipher` only gained `gcm_tag` after 1.17 and
+released versions bind no way to reach it, so GCM would require reopening a stdlib class.
+
+An encrypted body is stored as a JSON envelope tagged `__es`. Encrypted and plaintext
+bodies coexist in one store, so encryption can be switched on for new events with no
+migration and no backfill of history. Each ciphertext is bound to its own event, so an
+envelope cannot be moved to another row even by someone holding the key.
+
+---
+
 ### Configuration
 
 `ES::Config` is a global singleton that wires dependencies together:
@@ -285,8 +410,12 @@ ES::Config.configure do |c|
   c.event_store = ES::Adapters::EventStores::Postgres.new(db)
   c.queue       = ES::Adapters::Queues::Postgres.new(db)
   c.event_bus   = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
+  c.encryption  = ES::Encryption.new(key_store, key_ring) # optional
 end
 ```
+
+`encryption` is optional; leaving it unset behaves exactly as it did before payload
+encryption existed.
 
 ---
 

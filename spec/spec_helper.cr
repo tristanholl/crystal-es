@@ -49,6 +49,45 @@ class DummyEvent < ES::Event
   end
 end
 
+# An event whose body must be encrypted. `encrypted: true` makes
+# `encryption_key_id` a required argument of the generated constructor.
+class EncryptedEvent < ES::Event
+  include ::ES::EventDSL
+
+  define_event "Test", "encrypted_dummy", encrypted: true do
+    attribute :secret, String
+  end
+end
+
+# The same shape without the declaration, for comparing the two paths
+class PlainEvent < ES::Event
+  include ::ES::EventDSL
+
+  define_event "Test", "plain_dummy" do
+    attribute :secret, String
+  end
+end
+
+# An application key ring backed by freshly generated keys
+def test_key_ring(ids : Array(String) = ["v1"], current : String? = nil) : ES::ApplicationKeyRing
+  keys = Hash(String, Bytes).new
+  ids.each { |id| keys[id] = ES::PayloadCipher.random_key }
+  ES::ApplicationKeyRing.new(keys, current || ids.first)
+end
+
+# Encryption wired to an in-memory keystore
+def test_encryption(key_ring : ES::ApplicationKeyRing = test_key_ring) : ES::Encryption
+  ES::Encryption.new(ES::KeyStoreAdapters::InMemory.new, key_ring)
+end
+
+# A registry knowing the encrypted and plain test events
+def test_event_handlers : ES::EventHandlers
+  handlers = ES::EventHandlers.new
+  handlers.register(EncryptedEvent)
+  handlers.register(PlainEvent)
+  handlers
+end
+
 # Default Command — a pure data record
 struct DummyCommand < ES::Command
   def initialize(@aggregate_id : UUID = UUID.v7)

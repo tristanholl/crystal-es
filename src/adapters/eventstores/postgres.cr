@@ -1,8 +1,8 @@
 module ES
   module EventStoreAdapters
     class Postgres < ES::EventStore
-      # Initialize with a database connection
-      def initialize(@db : DB::Database)
+      # Initialize with a database connection and, optionally, payload encryption
+      def initialize(@db : DB::Database, @encryption : ES::Encryption? = ES::Config.encryption?)
       end
 
       # Initializes the database with the necessary schema, table and permissions for the eventstore
@@ -51,13 +51,13 @@ module ES
 
       # Appends an event to the event stream
       def append(event : ES::Event)
-        @db.exec %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2)), event.header.to_json, event.body.to_json
+        @db.exec %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2)), event.header.to_json, encode_body(event)
       end
 
       # Returns a single event for a given id
       def fetch_event(event_id : UUID) : ES::EventStore::Event
         header, body = @db.query_one %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id'=$1), event_id, as: {JSON::Any, JSON::Any}
-        ES::EventStore::Event.new(header, body)
+        decode(header, body)
       rescue DB::NoResultsError
         raise ES::Exception::NotFound.new("Event '#{event_id}' not found in eventstore")
       end
@@ -89,7 +89,7 @@ module ES
           break if rows.empty?
 
           rows.each do |id, header, body|
-            block.call(ES::EventStore::Event.new(header, body))
+            block.call(decode(header, body))
             cursor = id
           end
 
@@ -106,6 +106,14 @@ module ES
         result ? UUID.new(result) : nil
       end
 
+      # Returns the encryption keys used across an aggregate's stream
+      def encryption_key_ids(aggregate_id : UUID) : Array(UUID)
+        @db.query_all(
+          %(SELECT DISTINCT header->>'encryption_key_id' FROM "eventstore"."events" WHERE header->>'aggregate_id' = $1 AND header->>'encryption_key_id' IS NOT NULL),
+          aggregate_id, as: String
+        ).map { |id| UUID.new(id) }
+      end
+
       # Returns the stream of events for a given aggregate
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new
@@ -114,7 +122,7 @@ module ES
 
         prepared_statement.query(aggregate_id) do |result|
           result.each do
-            event_array << ES::EventStore::Event.new(result.read(JSON::Any), result.read(JSON::Any))
+            event_array << decode(result.read(JSON::Any), result.read(JSON::Any))
           end
         end
 
