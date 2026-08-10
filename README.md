@@ -417,10 +417,14 @@ Bodies are sealed with AES-256-CBC and an encrypt-then-MAC HMAC-SHA256 tag. AES-
 be the obvious choice, but Crystal's `OpenSSL::Cipher` only gained `gcm_tag` after 1.17 and
 released versions bind no way to reach it, so GCM would require reopening a stdlib class.
 
-An encrypted body is stored as a JSON envelope tagged `__es`. Encrypted and plaintext
-bodies coexist in one store, so encryption can be switched on for new events with no
-migration and no backfill of history. Each ciphertext is bound to its own event, so an
-envelope cannot be moved to another row even by someone holding the key.
+An encrypted body is stored as `{"iv": "<b64>", "ct": "<b64>", "tag": "<b64>"}` — nothing
+more. There is no marker field to say "this body is encrypted"; `header.encryption_key_id`
+already says that, so the header — not the body — is what a reader checks. Encrypted and
+plaintext bodies coexist in one store on that basis, so encryption can be switched on for
+new events with no migration and no backfill of history. Each ciphertext is bound to its
+own event *and* its own key — both travel inside the encrypted plaintext as a digest
+checked on open — so an envelope cannot be moved to another row, nor opened under a
+header naming a different key, even by someone holding both keys.
 
 ---
 

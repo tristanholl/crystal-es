@@ -49,17 +49,18 @@ module ES
       encryption.seal(event)
     end
 
-    # Turns a stored row into an event, decrypting the body when it is an envelope.
-    # A store always hands back plaintext, so nothing downstream has to know that
-    # encryption exists. If the key was destroyed, `ES::Exception::NotFound` raises
-    # straight through — the same as any other missing row.
+    # Turns a stored row into an event, decrypting the body when its header names a
+    # key. A store always hands back plaintext, so nothing downstream has to know
+    # that encryption exists. If the key was destroyed, `ES::Exception::NotFound`
+    # raises straight through — the same as any other missing row.
     protected def decode(header : JSON::Any, body : JSON::Any) : ES::EventStore::Event
-      return ES::EventStore::Event.new(header, body) unless ES::EncryptionKeyManager.envelope?(body)
+      parsed_header = ES::Event::Header.from_json(header.to_json)
+      return ES::EventStore::Event.new(header, body) if parsed_header.encryption_key_id.nil?
 
       encryption = @encryption
       raise ES::Exception::DependencyUnavailable.new("Event body is encrypted but this event store has no encryption configured") if encryption.nil?
 
-      ES::EventStore::Event.new(header, encryption.open(body, ES::Event::Header.from_json(header.to_json)))
+      ES::EventStore::Event.new(header, encryption.open(body, parsed_header))
     end
   end
 end

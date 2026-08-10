@@ -106,13 +106,22 @@ both, so there's no separation of duty to protect. AES-256 stays, and
 `body` stays `jsonb NOT NULL`:
 
 ```json
-{"__es":1,"alg":"...","kid":"<uuid>","iv":"<b64>","ct":"<b64>","tag":"<b64>"}
+{"iv":"<b64>","ct":"<b64>","tag":"<b64>"}
 ```
 
-The `__es` discriminator lets encrypted and plaintext bodies coexist in one store, so
-encryption switches on for new events with **no migration and no backfill**. Adding
-`encryption_key_id` to the header as a nilable field with a default is likewise backward
-compatible under `JSON::Serializable` — old rows read back as `nil`.
+No `alg`, no `kid`, no discriminator field — those were duplicating information the
+*header* already carries: `alg` repeats `KeyStore::Key#encryption_algorithm`, already
+recorded once per key row, and `kid` repeats `header.encryption_key_id`, which is what
+`seal`/`open` already use to select the key. The body no longer says whether it's
+encrypted at all; `header.encryption_key_id` says that. `seal` decides it at write time
+from the header, and `open` (via `EventStore#decode`) asks the same header field on the
+way back — there's nothing left to sniff out of the body's shape.
+
+That single discriminator is still what lets encrypted and plaintext bodies coexist in
+one store, so encryption switches on for new events with **no migration and no
+backfill**: `encryption_key_id` is a nilable header field with a default, backward
+compatible under `JSON::Serializable` — old rows read back as `nil`, exactly like a new
+plaintext row would.
 
 There is no path to encrypt existing events. That is an event-store rewrite, and not the
 library's job.
@@ -128,13 +137,21 @@ claims (`>= 1.14.0`).
 One data key in, two subkeys derived from it, so the same bytes never both encrypt and
 authenticate. The tag is verified before anything is decrypted.
 
-### Ciphertexts are bound to their event
+### Ciphertexts are bound to their event, and to their key
 
-A digest of `event_id|aggregate_id|aggregate_version|event_handle` travels *inside* the
-plaintext and is checked on open, and the envelope's `kid` is cross-checked against the
-header. Without this, an envelope could be transplanted between two events sharing a key
-and would decrypt cleanly. AAD would be the natural home for this, but no released Crystal
-exposes an AAD setter.
+A digest of `encryption_key_id|event_id|aggregate_id|aggregate_version|event_handle`
+travels *inside* the plaintext and is checked on open. Without this, an envelope could
+be transplanted between two events sharing a key and would decrypt cleanly. AAD would
+be the natural home for this, but no released Crystal exposes an AAD setter.
+
+`encryption_key_id` used to be an outer, unauthenticated `kid` field in the envelope,
+checked for equality against the header before decrypting. That was redundant with the
+cipher itself: `open` always fetches the key named by the header, never by the body, so
+a header naming the wrong key already fails the HMAC tag check regardless. Folding the
+key id into the digest instead means the one check that matters — "was this ciphertext
+actually sealed for the key and event I'm about to hand it back under?" — is verified
+inside the authenticated envelope, with no separate field to keep in sync or to tamper
+with independently.
 
 ### One application key, passed in — never read from the environment
 
@@ -180,7 +197,7 @@ signature.
 | `eventstore_flattened` view | none — body passes through |
 | pgmq queue | none — the trigger sends `NEW.header` only (`src/adapters/queues/postgres.cr:23`) |
 | `bus.publish` | none — the in-memory event keeps its plaintext body |
-| Existing plaintext events | none — `__es` discriminator |
+| Existing plaintext events | none — discriminated by `header.encryption_key_id`, absent on old rows |
 | SQL against `body->>'field'` | breaks for encrypted events (none in the library today) |
 | Projections | hold plaintext by design; rebuilt independently |
 
