@@ -388,9 +388,30 @@ deletion is the erasure.
 
 Once a key is deleted, reading a body that names it raises `ES::Exception::NotFound` —
 the same exception a missing event row would raise. There is no separate "shredded"
-signal to check first: `ES::Aggregate#hydrate` and `ES::Projection#replay` propagate it
-like any other unreadable event. If you want a projection replay to survive an erasure,
-rescue `ES::Exception::NotFound` around it — the library does not do that for you.
+signal to check first.
+
+Aggregates and projections handle that differently, because they answer different
+questions. `ES::Aggregate#hydrate` propagates it: an aggregate that cannot read its
+own history is in no position to decide anything, so `fetch_events`/`fetch_event`
+raise straight through.
+
+`ES::Projection#replay` and `#init` do not. Only some events in a stream may be
+encrypted at all — typically the ones carrying PII — so a projector's job is to
+build a best-effort read model over whatever the store can still decode, every
+time. A shredded key is an expected steady-state condition for a projector, not an
+exceptional one:
+
+- If the event's own body can't be decrypted, `EventStore#each_event` skips it and
+  logs a warning before it ever reaches your `apply`.
+- If your `apply` itself hits a destroyed key indirectly — e.g. it hydrates a
+  related aggregate to read a value recorded by an earlier, now-erased event —
+  `Projection#replay`/`#init` catch `ES::Exception::NotFound` raised out of `apply`
+  the same way: log and move on to the next event.
+
+This is unconditional, not an opt-in flag — there is nothing to configure. The
+trade-off: the library reuses one `NotFound` for "missing row" and "key destroyed"
+alike (see below), so a projection's `apply` cannot raise `NotFound` for an
+unrelated reason without it also being swallowed as if a key had been shredded.
 
 #### What this does and does not protect
 
@@ -425,6 +446,34 @@ new events with no migration and no backfill of history. Each ciphertext is boun
 own event *and* its own key — both travel inside the encrypted plaintext as a digest
 checked on open — so an envelope cannot be moved to another row, nor opened under a
 header naming a different key, even by someone holding both keys.
+
+#### Design notes
+
+A few decisions worth knowing the reasoning behind, since none of them are obvious
+from the code alone:
+
+- **Symmetric, not asymmetric.** An earlier sketch used an asymmetric scheme, but
+  asymmetric encryption only earns its cost when the party encrypting shouldn't be
+  able to decrypt. Here the same application does both, so there's no separation of
+  duty to protect — AES-256 stays, and `encryption_algorithm` records the real
+  cipher name rather than a signing algorithm that was never fit for this job.
+- **`NotFound` is reused deliberately**, for a destroyed key exactly as for any
+  missing row, rather than introducing a `shredded?`/tombstone signal. The deletion
+  *is* the erasure — no soft-delete flag, no separate state to keep in sync. The
+  cost of that choice is the one called out above: the library can't tell "key
+  shredded" apart from any other `NotFound` a projection's `apply` might raise.
+- **No key cache.** Every read does one `KeyStore#fetch` plus one symmetric unwrap —
+  hydrating an aggregate with several events under the same key does one fetch per
+  event rather than one per unique key. A real cost on long streams, deliberately
+  traded away for a first iteration; it can be reintroduced later inside
+  `EncryptionKeyManager#open`/`#seal` without changing the on-disk format or any
+  public signature.
+- **The application key must stay stable for the lifetime of the store.** Nothing
+  enforces this — generating it fresh on every process start (rather than loading it
+  from a stable secret) silently makes every previously wrapped data key
+  unreadable, which looks identical to shredding. This bit the bundled
+  `examples/financial-transaction` example itself before it was fixed to read
+  `APPLICATION_ENCRYPTION_KEYS` from the environment.
 
 ---
 
