@@ -21,9 +21,20 @@ event_handlers.register(Events::TransactionInitiated)
 event_handlers.register(Events::TransactionRejected)
 
 # Initializing the store (the example is using postgres)
-db = DB.open("postgres://es:es@localhost:33333/eventstore?max_pool_size=10")
+db = DB.open("postgres://es:es@database:5432/eventstore?max_pool_size=10")
 
-# Initialize event store
+# Initializing payload encryption. The application key is the one secret this
+# example manages directly — the library never reads it from the environment
+# itself. A real application would load it from wherever it keeps secrets, e.g.
+# `ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))`.
+application_key = ES::ApplicationEncryptionKeyManager.new(ES::PayloadCipher.random_key)
+key_store = ES::KeyStoreAdapters::Postgres.new(db)
+key_store.setup
+
+ES::Config.encryption = ES::EncryptionKeyManager.new(key_store, application_key)
+encryption = ES::Config.encryption
+
+# Initialize event store (picks up ES::Config.encryption automatically)
 ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
 store = ES::Config.event_store
 store.setup
@@ -31,6 +42,7 @@ store.setup
 # Initialize queue
 queue = ES::QueueAdapters::Postgres.new("default", db)
 store.setup
+
 
 # Intialize projection database
 ES::Config.projection_database = db
@@ -93,12 +105,19 @@ end
 creditor_account = UUID.new("01929fef-2e55-742f-b151-000000acc100")
 debtor_account = UUID.new("01929fef-2e55-742f-b151-000000acc200")
 
-# Create 1000 transactions
+enc_key_id = UUID.new(encryption.create_key)
+
+# Create 1000 transactions. TransactionInitiated is declared `encrypted: true`
+# (see events/transaction_initiated.cr), so each one needs its own data key —
+# destroying that key later erases both accounts named in the body.
 10.times do |i|
   event = Events::TransactionInitiated.new(
+    actor_id: nil,
+    command_handler: "example",
+    encryption_key_id: enc_key_id,
+    amount: (i + 1)*333,
     creditor_account: creditor_account,
-    debtor_account: debtor_account,
-    amount: (i + 1)*333
+    debtor_account: debtor_account
   )
 
   store.append(event)

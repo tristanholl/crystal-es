@@ -1,44 +1,12 @@
+# Carries the two account identifiers involved in a transaction, so it is
+# declared `encrypted: true`: the body is sealed under a data key chosen at
+# construction, and destroying that key later erases both accounts at once.
 class Events::TransactionInitiated < ES::Event
-  @@aggregate = "Transaction"
-  @@handle = "transaction.initiated"
+  include ES::EventDSL
 
-  struct Body < ES::Event::Body
-    include JSON::Serializable
-
-    getter amount : Int64
-    getter creditor_account : UUID
-    getter debtor_account : UUID
-
-    def initialize(
-      @amount : Int64,
-      @creditor_account : UUID,
-      @debtor_account : UUID,
-    ); end
-  end
-
-  def initialize(
-    @header : ES::Event::Header,
-    body : JSON::Any,
-  )
-    @body = Body.from_json(body.to_json)
-  end
-
-  def initialize(
-    amount : Int64,
-    creditor_account : UUID,
-    debtor_account : UUID,
-  )
-    @header = Header.new(
-      aggregate_id: UUID.v7,
-      aggregate_type: @@aggregate,
-      aggregate_version: 1,
-      command_handler: "test",
-      event_handle: @@handle
-    )
-    @body = Body.new(
-      amount: amount,
-      creditor_account: creditor_account,
-      debtor_account: debtor_account
-    )
+  define_event "Transaction", "transaction.initiated", encrypted: true do
+    attribute :amount, Int64
+    attribute :creditor_account, UUID
+    attribute :debtor_account, UUID
   end
 end
