@@ -58,7 +58,7 @@ module ES
         handle = es_event.header["event_handle"].as_s
         next unless @event_handlers.registered?(handle)
 
-        call(@event_handlers.materialize(es_event))
+        process(es_event)
       end
     end
 
@@ -78,9 +78,21 @@ module ES
           handle = es_event.header["event_handle"].as_s
           next unless @event_handlers.registered?(handle)
 
-          call(@event_handlers.materialize(es_event))
+          process(es_event)
         end
       end
+    end
+
+    # Applies one stored event, tolerating a key destroyed anywhere in the work
+    # `apply` does for it — not just the event's own body (already handled by
+    # `EventStore#each_event`), but also something `apply` reaches for, like an
+    # `Aggregate#hydrate` call that walks back into a stream holding a since-shredded
+    # event. Only some events carry encryption at all, so one destroyed key must not
+    # take down a projector's replay of everything else: log a warning and move on.
+    private def process(es_event : ES::EventStore::Event)
+      call(@event_handlers.materialize(es_event))
+    rescue ex : ES::Exception::NotFound
+      Log.warn { "Skipping event '#{es_event.header["event_id"]?}' (handle '#{es_event.header["event_handle"]?}') in #{self.class.name}: #{ex.message}" }
     end
 
     protected def table_empty? : Bool
