@@ -5,6 +5,7 @@ class Aggregate < ES::Aggregate
     property amount : Int64?
     property creditor_account : UUID?
     property debtor_account : UUID?
+    property encryption_key_id : UUID?
 
     property accepted : Bool = false
     property rejected : Bool = false
@@ -25,6 +26,7 @@ class Aggregate < ES::Aggregate
   # Apply 'Events::TransactionInitiated' to the aggregate state
   def apply(event : Events::TransactionInitiated)
     @state.increase_version(event.header.aggregate_version)
+    @state.encryption_key_id = event.header.encryption_key_id
 
     body = event.body.as(Events::TransactionInitiated::Body)
 
