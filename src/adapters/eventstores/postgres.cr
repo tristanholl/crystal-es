@@ -2,7 +2,7 @@ module ES
   module EventStoreAdapters
     class Postgres < ES::EventStore
       # Initialize with a database connection and, optionally, payload encryption
-      def initialize(@db : DB::Database, @encryption : ES::Encryption? = ES::Config.encryption?)
+      def initialize(@db : DB::Database, @encryption : ES::EncryptionKeyManager? = ES::Config.encryption?)
       end
 
       # Initializes the database with the necessary schema, table and permissions for the eventstore

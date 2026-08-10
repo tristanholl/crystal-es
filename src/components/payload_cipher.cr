@@ -13,7 +13,7 @@ module ES
   # bytes never both encrypt and authenticate.
   #
   # Ciphertexts are *not* bound to their context here. Callers that need that must
-  # carry the binding inside the plaintext — see `ES::Encryption#binding_digest`.
+  # carry the binding inside the plaintext — see `ES::EncryptionKeyManager#binding_digest`.
   module PayloadCipher
     ALGORITHM = "aes-256-cbc-hmac-sha256"
     CIPHER    = "aes-256-cbc"

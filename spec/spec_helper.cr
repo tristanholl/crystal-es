@@ -68,16 +68,14 @@ class PlainEvent < ES::Event
   end
 end
 
-# An application key ring backed by freshly generated keys
-def test_key_ring(ids : Array(String) = ["v1"], current : String? = nil) : ES::ApplicationKeyRing
-  keys = Hash(String, Bytes).new
-  ids.each { |id| keys[id] = ES::PayloadCipher.random_key }
-  ES::ApplicationKeyRing.new(keys, current || ids.first)
+# An application key manager backed by a freshly generated key
+def test_application_key : ES::ApplicationEncryptionKeyManager
+  ES::ApplicationEncryptionKeyManager.new(ES::PayloadCipher.random_key)
 end
 
-# Encryption wired to an in-memory keystore
-def test_encryption(key_ring : ES::ApplicationKeyRing = test_key_ring) : ES::Encryption
-  ES::Encryption.new(ES::KeyStoreAdapters::InMemory.new, key_ring)
+# An encryption key manager wired to an in-memory keystore
+def test_encryption(application_key : ES::ApplicationEncryptionKeyManager = test_application_key) : ES::EncryptionKeyManager
+  ES::EncryptionKeyManager.new(ES::KeyStoreAdapters::InMemory.new, application_key)
 end
 
 # A registry knowing the encrypted and plain test events

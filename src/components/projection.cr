@@ -55,10 +55,6 @@ module ES
       self.truncate if !self.class.table.empty?
 
       @event_store.each_event(until_event_id: until_event_id) do |es_event|
-        # An erased event has no body left to project. Skipping keeps read models
-        # rebuildable after an erasure, which they have to stay.
-        next if es_event.shredded?
-
         handle = es_event.header["event_handle"].as_s
         next unless @event_handlers.registered?(handle)
 
@@ -79,8 +75,6 @@ module ES
 
       spawn do
         @event_store.each_event(until_event_id: horizon, batch_size: self.class.projection_batch_size) do |es_event|
-          next if es_event.shredded?
-
           handle = es_event.header["event_handle"].as_s
           next unless @event_handlers.registered?(handle)
 

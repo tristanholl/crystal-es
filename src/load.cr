@@ -21,12 +21,11 @@ require "./exceptions/dependency_unavailable.cr"
 require "./exceptions/invalid_event_stream.cr"
 require "./exceptions/invalid_state.cr"
 require "./exceptions/not_found.cr"
-require "./exceptions/key_destroyed.cr"
 require "./exceptions/not_implemented.cr"
 
 # Event sourcing components
 require "./components/payload_cipher.cr"
-require "./components/application_key_ring.cr"
+require "./components/application_encryption_key_manager.cr"
 require "./components/aggregate.cr"
 require "./components/command.cr"
 require "./components/command_handler.cr"
@@ -48,7 +47,7 @@ require "./adapters/keystores/in_memory.cr"
 require "./adapters/keystores/postgres.cr"
 
 # Payload encryption, built on the key store above
-require "./components/encryption.cr"
+require "./components/encryption_key_manager.cr"
 
 # Infrastructure adapters
 # # Event stores

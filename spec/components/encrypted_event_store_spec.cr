@@ -24,7 +24,7 @@ describe "encrypted events in an event store" do
     # Reaching past the adapter on purpose: this asserts what is actually at rest,
     # which is the whole point of the feature.
     raw = store.@events[event.header.event_id]
-    ES::Encryption.envelope?(raw.body).should be_true
+    ES::EncryptionKeyManager.envelope?(raw.body).should be_true
     raw.body.to_json.includes?("iban-of-a-real-person").should be_false
   end
 
@@ -39,7 +39,6 @@ describe "encrypted events in an event store" do
     store.append(event)
     stored = store.fetch_event(event.header.event_id)
 
-    stored.shredded?.should be_false
     stored.body["secret"].as_s.should eq("recovered")
   end
 
@@ -102,11 +101,10 @@ describe "encrypted events in an event store" do
     store.append(event)
 
     store.fetch_event(event.header.event_id).body["secret"].as_s.should eq("plain")
-    store.fetch_event(event.header.event_id).shredded?.should be_false
   end
 
   describe "after the key is destroyed" do
-    it "reports the event as shredded and returns nothing" do
+    it "raises NotFound on read — the deletion is the erasure, nothing else signals it" do
       encryption = test_encryption
       store = ES::EventStoreAdapters::InMemory.new(encryption: encryption)
       key_id = encryption.create_key
@@ -117,27 +115,10 @@ describe "encrypted events in an event store" do
       store.append(event)
 
       encryption.destroy_key(key_id)
-      stored = store.fetch_event(event.header.event_id)
 
-      stored.shredded?.should be_true
-      stored.body.as_h.should be_empty
-    end
-
-    it "still exposes the header, so the stream keeps its shape" do
-      encryption = test_encryption
-      store = ES::EventStoreAdapters::InMemory.new(encryption: encryption)
-      key_id = encryption.create_key
-      event = EncryptedEvent.new(
-        actor_id: nil, command_handler: "handler",
-        encryption_key_id: key_id, secret: "to be erased"
-      )
-      store.append(event)
-      encryption.destroy_key(key_id)
-
-      stored = store.fetch_event(event.header.event_id)
-
-      stored.header["aggregate_version"].as_i.should eq(1)
-      stored.header["event_handle"].as_s.should eq("encrypted_dummy")
+      expect_raises(ES::Exception::NotFound) do
+        store.fetch_event(event.header.event_id)
+      end
     end
   end
 
@@ -187,7 +168,7 @@ describe "encrypted events in an event store" do
     end
   end
 
-  it "erases one key's events and leaves the rest of the stream readable" do
+  it "erases one key while another event under a different key stays readable on its own" do
     encryption = test_encryption
     store = ES::EventStoreAdapters::InMemory.new(encryption: encryption)
     aggregate_id = UUID.v7
@@ -207,10 +188,13 @@ describe "encrypted events in an event store" do
     store.append(kept)
 
     encryption.destroy_key(erased_key)
-    events = store.fetch_events(aggregate_id)
 
-    events[0].shredded?.should be_true
-    events[1].shredded?.should be_false
-    events[1].body["secret"].as_s.should eq("someone else's data")
+    store.fetch_event(kept.header.event_id).body["secret"].as_s.should eq("someone else's data")
+    expect_raises(ES::Exception::NotFound) { store.fetch_event(erased.header.event_id) }
+
+    # A stream fetch that includes an erased event fails as a whole — the library
+    # offers no way to read "the rest" of a stream mid-iteration; an application
+    # that wants that behavior builds it itself around `encryption_key_ids`.
+    expect_raises(ES::Exception::NotFound) { store.fetch_events(aggregate_id) }
   end
 end

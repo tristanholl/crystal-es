@@ -15,7 +15,6 @@ class SecretAggregate < ES::Aggregate
     aggregate_id : UUID,
     @event_store : ES::EventStore,
     @event_handlers : ES::EventHandlers? = nil,
-    @skip_shredded_events = false,
     @reject_unhandled_events = true,
   )
     @state = State.new(aggregate_id)
@@ -81,47 +80,28 @@ describe ES::Aggregate do
       aggregate.state.version.should eq(2)
     end
 
-    it "refuses to rebuild across a hole left by an erasure" do
+    it "raises NotFound across a hole left by an erasure — deletion is the answer, no special signal" do
       store, aggregate_id = stream_with_one_key_destroyed
 
-      expect_raises(ES::Exception::KeyDestroyed) do
+      expect_raises(ES::Exception::NotFound) do
         SecretAggregate.new(aggregate_id, store, test_event_handlers).hydrate
       end
-    end
-
-    it "rebuilds from the surviving events when the hole is opted into" do
-      store, aggregate_id = stream_with_one_key_destroyed
-
-      aggregate = SecretAggregate.new(aggregate_id, store, test_event_handlers, skip_shredded_events: true)
-      aggregate.hydrate
-
-      aggregate.state.secrets.should eq(["still readable"])
-    end
-
-    it "keeps the version moving across the hole, so later events stay in order" do
-      store, aggregate_id = stream_with_one_key_destroyed
-
-      aggregate = SecretAggregate.new(aggregate_id, store, test_event_handlers, skip_shredded_events: true)
-      aggregate.hydrate
-
-      aggregate.state.version.should eq(2)
     end
   end
 end
 
 describe ES::Projection do
   describe "#replay over an encrypted stream" do
-    it "skips erased events and completes, so read models stay rebuildable" do
-      SecretProjection.seen = [] of String
+    it "raises NotFound when it meets an erased event; surviving it is the application's to rescue" do
       store, _ = stream_with_one_key_destroyed
 
-      SecretProjection.new(
-        event_handlers: test_event_handlers,
-        event_store: store,
-        projection_database: DBMock.open,
-      ).replay(truncate: true)
-
-      SecretProjection.seen.should eq(["still readable"])
+      expect_raises(ES::Exception::NotFound) do
+        SecretProjection.new(
+          event_handlers: test_event_handlers,
+          event_store: store,
+          projection_database: DBMock.open,
+        ).replay(truncate: true)
+      end
     end
   end
 end
@@ -142,14 +122,6 @@ describe ES::EventHandlers do
       rebuilt.should be_a(EncryptedEvent)
       rebuilt.body.as(EncryptedEvent::Body).secret.should eq("materialized")
       rebuilt.header.encryption_key_id.should eq(event.header.encryption_key_id)
-    end
-
-    it "refuses a shredded event, which has no body to build from" do
-      store, aggregate_id = stream_with_one_key_destroyed
-
-      expect_raises(ES::Exception::KeyDestroyed) do
-        test_event_handlers.materialize(store.fetch_events(aggregate_id).first)
-      end
     end
   end
 end

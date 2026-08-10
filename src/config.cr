@@ -14,11 +14,11 @@ module ES
       eb
     end
 
-    def encryption=(param : ES::Encryption)
+    def encryption=(param : ES::EncryptionKeyManager)
       @@encryption = param
     end
 
-    def encryption : ES::Encryption
+    def encryption : ES::EncryptionKeyManager
       e = @@encryption
       raise "No encryption registered" if e.nil?
       e
@@ -26,7 +26,7 @@ module ES
 
     # Encryption is optional, so the event stores ask for it this way — an
     # unconfigured library behaves exactly as it did before encryption existed.
-    def encryption? : ES::Encryption?
+    def encryption? : ES::EncryptionKeyManager?
       @@encryption
     end
 
