@@ -10,4 +10,8 @@ dependencies:
   db:
     github: crystal-lang/crystal-db
 
+development_dependencies:
+  pg:
+    github: will/crystal-pg
+
 license: MIT
