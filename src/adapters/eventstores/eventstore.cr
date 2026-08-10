@@ -62,5 +62,20 @@ module ES
 
       ES::EventStore::Event.new(header, encryption.open(body, parsed_header))
     end
+
+    # Same as #decode, but tolerates a body encrypted under a key that has since
+    # been destroyed. Only some events in a stream may be encrypted at all —
+    # typically the ones carrying PII — so one shredded key must not stop a
+    # projector from replaying everything else. Logs a warning and returns nil
+    # instead of raising; #each_event uses this so a full-stream scan skips that
+    # one event and keeps going. #fetch_event and #fetch_events still call
+    # #decode directly: asking for one specific event or aggregate stream should
+    # fail loudly, not silently come back short.
+    protected def decode_or_skip(header : JSON::Any, body : JSON::Any) : ES::EventStore::Event?
+      decode(header, body)
+    rescue ex : ES::Exception::NotFound
+      Log.warn { "Skipping event '#{header["event_id"]?}' (handle '#{header["event_handle"]?}'): encryption key destroyed — #{ex.message}" }
+      nil
+    end
   end
 end
