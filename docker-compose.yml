@@ -33,7 +33,7 @@ services:
     ports:
       - 5432
     volumes:
-      - ./storage/postgres/data:/var/lib/postgresql/data
+      - ./storage/postgres:/var/lib/postgresql
 
 volumes:
   pgdata:
