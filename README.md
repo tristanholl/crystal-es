@@ -285,14 +285,16 @@ answer an erasure request. Confidentiality at rest comes along for free.
 Three pieces:
 
 - **`ES::ApplicationEncryptionKeyManager`** holds the one application encryption key
-  (the KEK), read from the environment. It's the only secret you manage.
+  (the KEK). It's the only secret you manage. The library never reads it from the
+  environment itself — that decision belongs to the application, so the key is
+  always passed in through the constructor.
 - **`ES::KeyStore`** stores data encryption keys (DEKs), each wrapped under the
   application key. `ES::KeyStoreAdapters::Postgres` and `::InMemory` are provided.
   Deliberately not event sourced — the whole point is that a row can be deleted.
 - **`ES::EncryptionKeyManager`** ties them together and is handed to the event store.
 
 ```crystal
-application_key = ES::ApplicationEncryptionKeyManager.from_env
+application_key = ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))
 key_store       = ES::KeyStoreAdapters::Postgres.new(db)
 key_store.setup
 
@@ -300,9 +302,9 @@ ES::Config.encryption  = ES::EncryptionKeyManager.new(key_store, application_key
 ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
 ```
 
-```
-APPLICATION_ENCRYPTION_KEYS="<base64 32 bytes>"
-```
+Where the key comes from — an environment variable, a mounted secret, a KMS call —
+and how it's encoded (the example above assumes base64) is entirely up to the
+application. `ES::ApplicationEncryptionKeyManager` only ever sees the raw key bytes.
 
 `application_encryption_key_id` on each key row is a SHA-256 digest of the
 application key's own bytes, not an operator-assigned name — so it's always correct
