@@ -3,10 +3,12 @@ module ES
   # directly. It is the key encryption key (KEK): it never touches an event body,
   # only the data encryption keys in `ES::KeyStore`, each wrapped under it.
   #
-  # Read once from the environment as raw base64:
+  # A library has no business reaching into the environment itself — that decision
+  # (an env var, a mounted secret, a KMS call) belongs to the application. This
+  # class only ever receives the key material through its constructor:
   #
   # ```
-  # APPLICATION_ENCRYPTION_KEYS = "<base64 32 bytes>"
+  # ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))
   # ```
   #
   # `key_id` — stored as `application_encryption_key_id` on each key row — is a
@@ -15,8 +17,6 @@ module ES
   # wrapped under a different key on a misconfigured environment fails on the id
   # mismatch in `unwrap`, rather than decrypting into garbage.
   class ApplicationEncryptionKeyManager
-    ENV_VARIABLE = "APPLICATION_ENCRYPTION_KEYS"
-
     # SHA-256 hex digest of the key's own bytes
     getter key_id : String
 
@@ -24,20 +24,6 @@ module ES
       raise ES::Exception::InvalidState.new("Application encryption key must be #{ES::PayloadCipher::KEY_SIZE} bytes, got #{@key.size}") if @key.size != ES::PayloadCipher::KEY_SIZE
 
       @key_id = Digest::SHA256.hexdigest(@key)
-    end
-
-    # Builds the manager from the environment
-    def self.from_env(variable : String = ENV_VARIABLE) : ApplicationEncryptionKeyManager
-      raw = ENV[variable]?
-      raise ES::Exception::DependencyUnavailable.new("Environment variable '#{variable}' is not set") if raw.nil? || raw.strip.empty?
-
-      key = begin
-        Base64.decode(raw.strip)
-      rescue
-        raise ES::Exception::InvalidState.new("Environment variable '#{variable}' is not valid base64")
-      end
-
-      new(key)
     end
 
     # Wraps a data encryption key under the application key

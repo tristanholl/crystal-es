@@ -1,31 +1,5 @@
 require "../spec_helper"
 
-private def with_env(values : Hash(String, String?), &)
-  previous = values.keys.to_h { |k| {k, ENV[k]?} }
-
-  values.each do |key, value|
-    if value.nil?
-      ENV.delete(key)
-    else
-      ENV[key] = value
-    end
-  end
-
-  yield
-ensure
-  previous.try &.each do |key, value|
-    if value.nil?
-      ENV.delete(key)
-    else
-      ENV[key] = value
-    end
-  end
-end
-
-private def encoded_key : String
-  Base64.strict_encode(ES::PayloadCipher.random_key)
-end
-
 describe ES::ApplicationEncryptionKeyManager do
   it "unwraps what it wrapped" do
     manager = test_application_key
@@ -79,29 +53,14 @@ describe ES::ApplicationEncryptionKeyManager do
     end
   end
 
-  it "reads the key from the environment as raw base64" do
+  it "accepts key material decoded by the application from wherever it is configured" do
     key = ES::PayloadCipher.random_key
+    encoded = Base64.strict_encode(key)
 
-    with_env({ES::ApplicationEncryptionKeyManager::ENV_VARIABLE => Base64.strict_encode(key)}) do
-      manager = ES::ApplicationEncryptionKeyManager.from_env
+    # Stands in for an application reading APPLICATION_ENCRYPTION_KEYS (or any
+    # other source) itself — the library never touches ENV.
+    manager = ES::ApplicationEncryptionKeyManager.new(Base64.decode(encoded))
 
-      manager.key_id.should eq(Digest::SHA256.hexdigest(key))
-    end
-  end
-
-  it "reports an unset environment variable" do
-    with_env({ES::ApplicationEncryptionKeyManager::ENV_VARIABLE => nil}) do
-      expect_raises(ES::Exception::DependencyUnavailable) do
-        ES::ApplicationEncryptionKeyManager.from_env
-      end
-    end
-  end
-
-  it "rejects a value that is not valid base64" do
-    with_env({ES::ApplicationEncryptionKeyManager::ENV_VARIABLE => "not-base64!!"}) do
-      expect_raises(ES::Exception::InvalidState) do
-        ES::ApplicationEncryptionKeyManager.from_env
-      end
-    end
+    manager.key_id.should eq(Digest::SHA256.hexdigest(key))
   end
 end

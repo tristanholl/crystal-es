@@ -114,14 +114,23 @@ header. Without this, an envelope could be transplanted between two events shari
 and would decrypt cleanly. AAD would be the natural home for this, but no released Crystal
 exposes an AAD setter.
 
-### One application key from the environment, identified by its own hash
+### One application key, passed in — never read from the environment
 
-`ES::ApplicationEncryptionKeyManager` reads a single raw base64 key from
-`APPLICATION_ENCRYPTION_KEYS`. `application_encryption_key_id` on each key row is
-`Digest::SHA256.hexdigest` of that key's bytes, not an operator-assigned name — so it's
-always correct for whatever key is actually loaded, and a key row wrapped under a
-different key on a misconfigured environment fails the id check in `unwrap` rather than
-decrypting into garbage.
+`ES::ApplicationEncryptionKeyManager` takes its key as raw bytes through the
+constructor and does not touch `ENV` itself. This is a library; deciding where a
+secret comes from — an environment variable, a mounted file, a KMS call — is an
+application concern, not something the library should assume. The application reads
+`APPLICATION_ENCRYPTION_KEYS` (or wherever it keeps the key) and passes the decoded
+bytes in:
+
+```crystal
+ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))
+```
+
+`application_encryption_key_id` on each key row is `Digest::SHA256.hexdigest` of that
+key's bytes, not an operator-assigned name — so it's always correct for whatever key
+is actually loaded, and a key row wrapped under a different key on a misconfigured
+environment fails the id check in `unwrap` rather than decrypting into garbage.
 
 No rotation. Changing the application key makes every existing data key unwrappable, so
 it is effectively fixed for the store's lifetime in this iteration. A ring holding
