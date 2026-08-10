@@ -14,6 +14,7 @@ module ES
       getter command_handler : String = "undefined"
       getter command_handler_version : String = ES::Config.version
       getter created_at : Time = Time.utc
+      getter encryption_key_id : UUID? = nil
       getter event_handle : String = "undefined"
       getter event_id : UUID = UUID.v7
       getter event_version : String = "1.0.0"
@@ -31,6 +32,7 @@ module ES
         @aggregate_type = "undefined",
         @command_handler = "undefined",
         @command_handler_version = ES::Config.version,
+        @encryption_key_id : UUID? = nil,
       )
       end
     end
@@ -53,6 +55,16 @@ module ES
     # Returns the event handle
     def self.handle
       @@handle
+    end
+
+    # Whether the body of this event must be encrypted before it is stored.
+    #
+    # Declared per event class rather than decided per call, so which events carry
+    # protected data is greppable and visible in review. `define_event(encrypted:
+    # true)` overrides this and makes `encryption_key_id` a required constructor
+    # argument, which is what stops a handler quietly writing plaintext.
+    def self.encrypted? : Bool
+      false
     end
 
     def initialize
