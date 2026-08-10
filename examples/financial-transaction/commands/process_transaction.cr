@@ -38,7 +38,6 @@ class Commands::ProcessTransactionHandler < ES::CommandHandler(Commands::Process
               Events::TransactionRejected.new(
                 actor_id: nil,
                 command_handler: self.class.to_s,
-                encryption_key_id: encryption_key_id,
                 reason: "Amount above threshold of 1000: '#{transaction_amount}'",
                 aggregate_id: command.aggregate_id,
                 aggregate_version: next_version,
