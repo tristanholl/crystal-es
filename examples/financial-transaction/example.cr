@@ -25,9 +25,20 @@ db = DB.open("postgres://es:es@database:5432/eventstore?max_pool_size=10")
 
 # Initializing payload encryption. The application key is the one secret this
 # example manages directly — the library never reads it from the environment
-# itself. A real application would load it from wherever it keeps secrets, e.g.
-# `ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))`.
-application_key = ES::ApplicationEncryptionKeyManager.new(ES::PayloadCipher.random_key)
+# itself. It must stay stable across runs: the event store and key store persist
+# in postgres (`setup` is a noop once the tables exist), so a fresh random key on
+# every restart would leave every previously wrapped data key unreadable, even
+# though nothing was actually shredded.
+application_key_bytes = if encoded = ENV["APPLICATION_ENCRYPTION_KEYS"]?
+                          Base64.decode(encoded)
+                        else
+                          generated = ES::PayloadCipher.random_key
+                          STDERR.puts "APPLICATION_ENCRYPTION_KEYS not set; generated one for this run."
+                          STDERR.puts "Export it before the next run to keep reading what this run writes:"
+                          STDERR.puts "  export APPLICATION_ENCRYPTION_KEYS=#{Base64.strict_encode(generated)}"
+                          generated
+                        end
+application_key = ES::ApplicationEncryptionKeyManager.new(application_key_bytes)
 key_store = ES::KeyStoreAdapters::Postgres.new(db)
 key_store.setup
 
@@ -42,7 +53,6 @@ store.setup
 # Initialize queue
 queue = ES::QueueAdapters::Postgres.new("default", db)
 store.setup
-
 
 # Intialize projection database
 ES::Config.projection_database = db
