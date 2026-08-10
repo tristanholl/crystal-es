@@ -22,16 +22,6 @@ describe ES::EncryptionKeyManager do
       JSON.parse(encryption.seal(event))["secret"].as_s.should eq("not a secret")
     end
 
-    it "encrypts an undeclared event that names a key anyway" do
-      encryption = test_encryption
-      event = PlainEvent.new(
-        actor_id: nil, command_handler: "handler",
-        secret: "opted in", encryption_key_id: encryption.create_key
-      )
-
-      JSON.parse(encryption.seal(event)).as_h.keys.sort.should eq(["ct", "iv", "tag"])
-    end
-
     it "refuses to seal a destroyed key, so nothing lands under an erased key" do
       encryption = test_encryption
       key_id = encryption.create_key

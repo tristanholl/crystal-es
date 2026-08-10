@@ -16,6 +16,10 @@ module ES
     # the key its body will be sealed under. The key itself is chosen by the caller
     # at construction, which is what allows one aggregate's events to sit under
     # several keys.
+    #
+    # `encrypted` left at its default has no `encryption_key_id` parameter at all —
+    # passing one to an event that doesn't declare `encrypted: true` is a compile
+    # error, not a silent per-instance opt-in.
     macro define_event(event_type, event_handle, encrypted = false, &block)
       @@type = {{ event_type }}
       @@handle = {{ event_handle }}
@@ -72,9 +76,6 @@ module ES
         comment = "",
         aggregate_id = UUID.v7,
         aggregate_version : Int32 = 1,
-        {% if !encrypted %}
-          encryption_key_id : UUID? = nil,
-        {% end %}
       )
         @header = Header.new(
           actor_id: actor_id,
@@ -82,7 +83,7 @@ module ES
           aggregate_type: @@type,
           aggregate_version: aggregate_version,
           command_handler: command_handler,
-          encryption_key_id: encryption_key_id,
+          encryption_key_id: {% if encrypted %} encryption_key_id {% else %} nil {% end %},
           event_handle: @@handle
         )
         @body = Body.new(
