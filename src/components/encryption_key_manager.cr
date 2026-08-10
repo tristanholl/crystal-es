@@ -26,12 +26,6 @@ module ES
   # key_manager.destroy_key(key_id) # the body is now gone
   # ```
   class EncryptionKeyManager
-    # Marks a body as an envelope rather than plaintext. Its presence is what lets
-    # encrypted and plaintext bodies coexist in one store, so encryption can be
-    # switched on for new events without rewriting a byte of history.
-    ENVELOPE_MARKER = "__es"
-    ENVELOPE_FORMAT = 1
-
     def initialize(
       @key_store : ES::KeyStore,
       @application_key : ES::ApplicationEncryptionKeyManager,
@@ -78,9 +72,6 @@ module ES
 
       JSON.build do |json|
         json.object do
-          json.field ENVELOPE_MARKER, ENVELOPE_FORMAT
-          json.field "alg", ES::PayloadCipher::ALGORITHM
-          json.field "kid", encryption_key_id.to_s
           json.field "iv", Base64.strict_encode(sealed.iv)
           json.field "ct", Base64.strict_encode(sealed.ciphertext)
           json.field "tag", Base64.strict_encode(sealed.tag)
@@ -94,13 +85,8 @@ module ES
     # that propagates as-is — the same exception any other missing row would raise.
     # There is no separate "shredded" signal: the deletion is the answer.
     def open(body : JSON::Any, header : ES::Event::Header) : JSON::Any
-      return body unless self.class.envelope?(body)
-
       encryption_key_id = header.encryption_key_id
-      raise ES::Exception::InvalidEventStream.new("Event '#{header.event_id}' has an encrypted body but no encryption_key_id in its header") if encryption_key_id.nil?
-
-      kid = body["kid"]?.try(&.as_s?)
-      raise ES::Exception::InvalidEventStream.new("Event '#{header.event_id}' envelope names key '#{kid}' but its header names '#{encryption_key_id}'") if kid != encryption_key_id.to_s
+      return body if encryption_key_id.nil?
 
       key = @key_store.fetch(encryption_key_id)
 
@@ -121,15 +107,11 @@ module ES
       inner
     end
 
-    # Whether a stored body is an envelope rather than plaintext
-    def self.envelope?(body : JSON::Any) : Bool
-      !!body.as_h?.try(&.has_key?(ENVELOPE_MARKER))
-    end
-
-    # Binds a ciphertext to the one event it belongs to, so an envelope cannot be
-    # moved to another row even by someone holding the key
+    # Binds a ciphertext to the one event — and the one key — it belongs to, so an
+    # envelope cannot be moved to another row, nor opened under a header naming a
+    # different key, even by someone holding both keys.
     private def binding_digest(header : ES::Event::Header) : String
-      Digest::SHA256.hexdigest("#{header.event_id}|#{header.aggregate_id}|#{header.aggregate_version}|#{header.event_handle}")
+      Digest::SHA256.hexdigest("#{header.encryption_key_id}|#{header.event_id}|#{header.aggregate_id}|#{header.aggregate_version}|#{header.event_handle}")
     end
 
     private def decode_field(body : JSON::Any, field : String, header : ES::Event::Header) : Bytes

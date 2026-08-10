@@ -11,9 +11,7 @@ describe ES::EncryptionKeyManager do
 
       body = JSON.parse(encryption.seal(event))
 
-      body[ES::EncryptionKeyManager::ENVELOPE_MARKER].should eq(ES::EncryptionKeyManager::ENVELOPE_FORMAT)
-      body["alg"].as_s.should eq(ES::PayloadCipher::ALGORITHM)
-      body["kid"].as_s.should eq(event.header.encryption_key_id.to_s)
+      body.as_h.keys.sort.should eq(["ct", "iv", "tag"])
       body.to_json.includes?("iban-of-a-real-person").should be_false
     end
 
@@ -31,7 +29,7 @@ describe ES::EncryptionKeyManager do
         secret: "opted in", encryption_key_id: encryption.create_key
       )
 
-      ES::EncryptionKeyManager.envelope?(JSON.parse(encryption.seal(event))).should be_true
+      JSON.parse(encryption.seal(event)).as_h.keys.sort.should eq(["ct", "iv", "tag"])
     end
 
     it "refuses to seal a destroyed key, so nothing lands under an erased key" do
@@ -119,32 +117,39 @@ describe ES::EncryptionKeyManager do
       end
     end
 
-    it "refuses an envelope whose key disagrees with the header" do
+    # The key id no longer travels as its own outer field to compare against the
+    # header — it is folded into the binding digest instead (see `binding_digest`),
+    # so naming a different key is indistinguishable from naming a different event:
+    # the envelope was never sealed under the key this header points at, and
+    # `PayloadCipher.open` rejects it on the HMAC tag before the digest is even
+    # looked at.
+    it "refuses to open an envelope under a header naming a different key than the one it was sealed under" do
       encryption = test_encryption
-      event = EncryptedEvent.new(
+      sealed_under = EncryptedEvent.new(
         actor_id: nil, command_handler: "handler",
         encryption_key_id: encryption.create_key, secret: "secret"
       )
+      envelope = JSON.parse(encryption.seal(sealed_under))
 
-      envelope = JSON.parse(encryption.seal(event)).as_h
-      envelope["kid"] = JSON::Any.new(UUID.v7.to_s)
+      header_naming_another_key = EncryptedEvent.new(
+        actor_id: nil, command_handler: "handler",
+        encryption_key_id: encryption.create_key, secret: "secret"
+      ).header
 
       expect_raises(ES::Exception::InvalidEventStream) do
-        encryption.open(JSON::Any.new(envelope), event.header)
+        encryption.open(envelope, header_naming_another_key)
       end
     end
 
-    it "refuses an encrypted body whose header names no key" do
+    # Discrimination between plaintext and encrypted bodies now lives entirely in
+    # the header: there is no body-level marker left to sniff. A plaintext body
+    # that merely happens to share field names with an envelope is not
+    # distinguishable from a real one — the header settles it.
+    it "treats a body as plaintext whenever the header names no key, even one shaped like an envelope" do
       encryption = test_encryption
-      event = EncryptedEvent.new(
-        actor_id: nil, command_handler: "handler",
-        encryption_key_id: encryption.create_key, secret: "secret"
-      )
-      envelope = JSON.parse(encryption.seal(event))
+      shaped_like_an_envelope = JSON.parse(%({"iv": "x", "ct": "y", "tag": "z"}))
 
-      expect_raises(ES::Exception::InvalidEventStream) do
-        encryption.open(envelope, ES::Event::Header.new)
-      end
+      encryption.open(shaped_like_an_envelope, ES::Event::Header.new).should eq(shaped_like_an_envelope)
     end
 
     it "detects a modified ciphertext" do
@@ -183,23 +188,6 @@ describe ES::EncryptionKeyManager do
 
       encryption.destroy_key(key_id)
       encryption.destroy_key(key_id)
-    end
-  end
-
-  describe ".envelope?" do
-    it "recognises an envelope" do
-      encryption = test_encryption
-      event = EncryptedEvent.new(
-        actor_id: nil, command_handler: "handler",
-        encryption_key_id: encryption.create_key, secret: "secret"
-      )
-
-      ES::EncryptionKeyManager.envelope?(JSON.parse(encryption.seal(event))).should be_true
-    end
-
-    it "does not mistake a plain body for one" do
-      ES::EncryptionKeyManager.envelope?(JSON.parse(%({"secret": "plain"}))).should be_false
-      ES::EncryptionKeyManager.envelope?(JSON.parse(%([1, 2, 3]))).should be_false
     end
   end
 end

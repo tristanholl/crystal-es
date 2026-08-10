@@ -24,7 +24,7 @@ describe "encrypted events in an event store" do
     # Reaching past the adapter on purpose: this asserts what is actually at rest,
     # which is the whole point of the feature.
     raw = store.@events[event.header.event_id]
-    ES::EncryptionKeyManager.envelope?(raw.body).should be_true
+    raw.body.as_h.keys.sort.should eq(["ct", "iv", "tag"])
     raw.body.to_json.includes?("iban-of-a-real-person").should be_false
   end
 
