@@ -294,7 +294,7 @@ Three pieces:
 - **`ES::EncryptionKeyManager`** ties them together and is handed to the event store.
 
 ```crystal
-application_key = ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))
+application_key = ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEY"]))
 key_store       = ES::KeyStoreAdapters::Postgres.new(db)
 key_store.setup
 
@@ -473,7 +473,7 @@ from the code alone:
   from a stable secret) silently makes every previously wrapped data key
   unreadable, which looks identical to shredding. This bit the bundled
   `examples/financial-transaction` example itself before it was fixed to read
-  `APPLICATION_ENCRYPTION_KEYS` from the environment.
+  `APPLICATION_ENCRYPTION_KEY` from the environment.
 
 ---
 
