@@ -8,7 +8,7 @@ module ES
   # class only ever receives the key material through its constructor:
   #
   # ```
-  # ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))
+  # ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEY"]))
   # ```
   #
   # `key_id` — stored as `application_encryption_key_id` on each key row — is a

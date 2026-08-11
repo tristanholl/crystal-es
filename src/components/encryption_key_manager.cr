@@ -14,7 +14,7 @@ module ES
   # data can be keyed by that customer even when the aggregate is an order.
   #
   # ```
-  # application_key = ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEYS"]))
+  # application_key = ES::ApplicationEncryptionKeyManager.new(Base64.decode(ENV["APPLICATION_ENCRYPTION_KEY"]))
   # key_manager = ES::EncryptionKeyManager.new(key_store, application_key)
   # key_id = key_manager.create_key
   #

@@ -29,13 +29,13 @@ db = DB.open("postgres://es:es@database:5432/eventstore?max_pool_size=10")
 # in postgres (`setup` is a noop once the tables exist), so a fresh random key on
 # every restart would leave every previously wrapped data key unreadable, even
 # though nothing was actually shredded.
-application_key_bytes = if encoded = ENV["APPLICATION_ENCRYPTION_KEYS"]?
+application_key_bytes = if encoded = ENV["APPLICATION_ENCRYPTION_KEY"]?
                           Base64.decode(encoded)
                         else
                           generated = ES::PayloadCipher.random_key
-                          STDERR.puts "APPLICATION_ENCRYPTION_KEYS not set; generated one for this run."
+                          STDERR.puts "APPLICATION_ENCRYPTION_KEY not set; generated one for this run."
                           STDERR.puts "Export it before the next run to keep reading what this run writes:"
-                          STDERR.puts "  export APPLICATION_ENCRYPTION_KEYS=#{Base64.strict_encode(generated)}"
+                          STDERR.puts "  export APPLICATION_ENCRYPTION_KEY=#{Base64.strict_encode(generated)}"
                           generated
                         end
 application_key = ES::ApplicationEncryptionKeyManager.new(application_key_bytes)

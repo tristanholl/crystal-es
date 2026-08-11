@@ -57,7 +57,7 @@ describe ES::ApplicationEncryptionKeyManager do
     key = ES::PayloadCipher.random_key
     encoded = Base64.strict_encode(key)
 
-    # Stands in for an application reading APPLICATION_ENCRYPTION_KEYS (or any
+    # Stands in for an application reading APPLICATION_ENCRYPTION_KEY (or any
     # other source) itself — the library never touches ENV.
     manager = ES::ApplicationEncryptionKeyManager.new(Base64.decode(encoded))
 
