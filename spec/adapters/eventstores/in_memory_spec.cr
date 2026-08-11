@@ -51,7 +51,7 @@ describe ES::EventStoreAdapters::InMemory do
     store.last_event_id.should eq(e2.header.event_id)
   end
 
-  it "can append, fetch single and all events", tags: "db" do
+  it "can append, fetch single and all events" do
     store = ES::EventStoreAdapters::InMemory.new
     event = DummyEvent.new
 
@@ -74,7 +74,7 @@ describe ES::EventStoreAdapters::InMemory do
     event_ids = [] of UUID
 
     es_events.each do |es_event|
-      h = ES::Event::Header.from_json(es_event_1.header.to_json)
+      h = ES::Event::Header.from_json(es_event.header.to_json)
       aggr_ids << h.aggregate_id
       event_ids << h.event_id
     end
