@@ -278,19 +278,16 @@ bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 
 ### Payload Encryption
 
-Event bodies can be encrypted at rest so that destroying one key erases the data
-under it — an event store is immutable, so a key you can destroy is the only way to
-answer an erasure request. Confidentiality at rest comes along for free.
+Event bodies can be encrypted at rest, per event, under a key that can later be
+destroyed to erase that data permanently.
 
 Three pieces:
 
 - **`ES::ApplicationEncryptionKeyManager`** holds the one application encryption key
-  (the KEK). It's the only secret you manage. The library never reads it from the
-  environment itself — that decision belongs to the application, so the key is
-  always passed in through the constructor.
+  (the KEK). Passed in through the constructor — the library never reads it from the
+  environment itself.
 - **`ES::KeyStore`** stores data encryption keys (DEKs), each wrapped under the
   application key. `ES::KeyStoreAdapters::Postgres` and `::InMemory` are provided.
-  Deliberately not event sourced — the whole point is that a row can be deleted.
 - **`ES::EncryptionKeyManager`** ties them together and is handed to the event store.
 
 ```crystal
@@ -302,21 +299,13 @@ ES::Config.encryption  = ES::EncryptionKeyManager.new(key_store, application_key
 ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
 ```
 
-Where the key comes from — an environment variable, a mounted secret, a KMS call —
-and how it's encoded (the example above assumes base64) is entirely up to the
-application. `ES::ApplicationEncryptionKeyManager` only ever sees the raw key bytes.
-
-`application_encryption_key_id` on each key row is a SHA-256 digest of the
-application key's own bytes, not an operator-assigned name — so it's always correct
-for whatever key is actually loaded, and a key row wrapped under a different key on
-a misconfigured environment fails the id check in `unwrap` rather than silently
-decrypting into garbage.
+Where the key comes from and how it's encoded (the example above assumes base64) is
+up to the application; `ES::ApplicationEncryptionKeyManager` only ever sees the raw
+key bytes.
 
 #### Declaring an encrypted event
 
-`encrypted: true` makes `encryption_key_id` a **required** constructor argument, so an
-event carrying protected data cannot be built without naming the key it will be sealed
-under:
+`encrypted: true` makes `encryption_key_id` a required constructor argument:
 
 ```crystal
 define_event("customer", "customer_registered", encrypted: true) do
@@ -325,9 +314,9 @@ define_event("customer", "customer_registered", encrypted: true) do
 end
 ```
 
-The key is chosen when the event is constructed, not derived from it. That is what lets
-one aggregate's events sit under several keys — events carrying a customer's data can be
-keyed by that customer even when the aggregate is an order:
+The key is chosen when the event is constructed, not derived from it, so one
+aggregate's events can sit under several keys — events carrying a customer's data can
+be keyed by that customer even when the aggregate is an order:
 
 ```crystal
 key_id = ES::Config.encryption.create_key
@@ -338,33 +327,19 @@ key_id = ES::Config.encryption.create_key
 ))
 ```
 
-Appending a declared-encrypted event to a store with no encryption configured raises,
-rather than quietly writing plaintext.
-
 #### Encryption is opt-in per application
 
-Nothing about the library requires an application to configure encryption at all.
-Declaring `encrypted: true` on an event class costs nothing by itself — it's a
-class-level flag, not a dependency on `ES::Config.encryption` — so an application
-that never touches payload encryption can define, ship, and never construct such
-an event without any effect on the rest of the library.
+Declaring `encrypted: true` on an event class has no effect on an application that
+never configures `ES::Config.encryption` — encrypted and unencrypted event types can
+coexist freely. Using an encrypted event without the matching configuration fails
+loudly rather than writing something unencrypted or unreadable:
 
-What the library guarantees instead is that the failure mode is always loud, never
-silent:
-
-- **No encryption configured, and an encrypted event is appended** — raises
-  `ES::Exception::InvalidState` rather than persisting plaintext under a body that
-  looks encrypted.
-- **No encryption configured, and an encrypted envelope is read back** — raises
+- **No encryption configured, appending an encrypted event** — raises
+  `ES::Exception::InvalidState`.
+- **No encryption configured, reading back an encrypted envelope** — raises
   `ES::Exception::DependencyUnavailable`.
-- **Encryption is configured, but the referenced key doesn't exist** (never
-  created, destroyed, or from a different environment) — raises
-  `ES::Exception::NotFound` from the key store.
-
-In short: mixing encrypted and unencrypted event types in one codebase is fine
-even if the application as a whole never sets up encryption — you only pay for
-what you actually use, and using it without the matching configuration fails
-immediately instead of quietly writing something unencrypted or unreadable.
+- **Encryption configured, but the referenced key doesn't exist** (never created,
+  destroyed, or from a different environment) — raises `ES::Exception::NotFound`.
 
 #### Erasure
 
@@ -376,104 +351,54 @@ store.encryption_key_ids(aggregate_id).each { |id| ES::Config.encryption.destroy
 ES::Config.encryption.destroy_key(key_id)
 ```
 
-The key table holds **no reference to any business entity** — references run one way
-only, from an event header to a key, so domain identifiers never accumulate next to the
-keys. The reverse lookup is `encryption_key_ids` for a single aggregate; a data subject
-spanning several aggregates is yours to map.
-
-`destroy_key` deletes the row. There is no tombstone and no soft-delete flag — the
-deletion is the erasure.
+The key table holds no reference to any business entity — references run one way
+only, from an event header to a key. `encryption_key_ids` looks up the keys for a
+single aggregate; a data subject spanning several aggregates is yours to map.
+`destroy_key` deletes the row — deletion is the erasure, with no tombstone or
+soft-delete flag.
 
 #### Reading a stream after an erasure
 
-Once a key is deleted, reading a body that names it raises `ES::Exception::NotFound` —
-the same exception a missing event row would raise. There is no separate "shredded"
-signal to check first.
+Once a key is deleted, reading a body that names it raises `ES::Exception::NotFound`.
+Aggregates and projections handle that differently:
 
-Aggregates and projections handle that differently, because they answer different
-questions. `ES::Aggregate#hydrate` propagates it: an aggregate that cannot read its
-own history is in no position to decide anything, so `fetch_events`/`fetch_event`
-raise straight through.
+- **`ES::Aggregate#hydrate`** propagates it — `fetch_events`/`fetch_event` raise
+  straight through.
+- **`ES::Projection#replay`/`#init`** do not. `EventStore#each_event` skips an event
+  it can't decrypt and logs a warning before it reaches your `apply`. If `apply`
+  itself hits a destroyed key indirectly (e.g. hydrating a related aggregate), the
+  same `NotFound` is caught, logged, and skipped so replay continues.
 
-`ES::Projection#replay` and `#init` do not. Only some events in a stream may be
-encrypted at all — typically the ones carrying PII — so a projector's job is to
-build a best-effort read model over whatever the store can still decode, every
-time. A shredded key is an expected steady-state condition for a projector, not an
-exceptional one:
-
-- If the event's own body can't be decrypted, `EventStore#each_event` skips it and
-  logs a warning before it ever reaches your `apply`.
-- If your `apply` itself hits a destroyed key indirectly — e.g. it hydrates a
-  related aggregate to read a value recorded by an earlier, now-erased event —
-  `Projection#replay`/`#init` catch `ES::Exception::NotFound` raised out of `apply`
-  the same way: log and move on to the next event.
-
-This is unconditional, not an opt-in flag — there is nothing to configure. The
-trade-off: the library reuses one `NotFound` for "missing row" and "key destroyed"
-alike (see below), so a projection's `apply` cannot raise `NotFound` for an
-unrelated reason without it also being swallowed as if a key had been shredded.
+This is unconditional — there is nothing to configure. Note that the library reuses
+one `NotFound` for "missing row" and "key destroyed" alike, so a projection's `apply`
+cannot raise `NotFound` for an unrelated reason without it also being treated as a
+shredded key.
 
 #### What this does and does not protect
 
 Protected: event bodies at rest — dumps, backups, replicas, a DBA with `SELECT` — and
 erasure by key destruction.
 
-Not protected: the event *header* (it is indexed and drives the flattened view, so it
-stays plaintext), application memory, logs, and **projections**. A projection built from
-an encrypted event stores whatever it extracted in the clear; encryption stops at the
-event store, and purging or rebuilding read models after an erasure is the application's
-job.
+Not protected: the event header (stays plaintext, since it drives the flattened
+view), application memory, logs, and projections — a projection built from an
+encrypted event stores whatever it extracted in the clear, so purging or rebuilding
+read models after an erasure is the application's job.
 
 #### What is not offered
 
-There is no rotation of any kind in this first iteration — neither for the application
-key nor for a data key. Changing the application key means every existing data key
-becomes unreadable, so treat it as fixed for the lifetime of the store, the same way you
-would any other irreplaceable secret. Rotating a *data* key would mean re-encrypting
-stored bodies, which is a rewrite of the event store and is not offered either way.
+No key rotation, for either the application key or a data key, in this first
+iteration. The application key must stay fixed for the lifetime of the store, the
+same as any other irreplaceable secret.
 
 #### Notes
 
-Bodies are sealed with AES-256-CBC and an encrypt-then-MAC HMAC-SHA256 tag. AES-GCM would
-be the obvious choice, but Crystal's `OpenSSL::Cipher` only gained `gcm_tag` after 1.17 and
-released versions bind no way to reach it, so GCM would require reopening a stdlib class.
-
-An encrypted body is stored as `{"iv": "<b64>", "ct": "<b64>", "tag": "<b64>"}` — nothing
-more. There is no marker field to say "this body is encrypted"; `header.encryption_key_id`
-already says that, so the header — not the body — is what a reader checks. Encrypted and
-plaintext bodies coexist in one store on that basis, so encryption can be switched on for
-new events with no migration and no backfill of history. Each ciphertext is bound to its
-own event *and* its own key — both travel inside the encrypted plaintext as a digest
-checked on open — so an envelope cannot be moved to another row, nor opened under a
-header naming a different key, even by someone holding both keys.
-
-#### Design notes
-
-A few decisions worth knowing the reasoning behind, since none of them are obvious
-from the code alone:
-
-- **Symmetric, not asymmetric.** An earlier sketch used an asymmetric scheme, but
-  asymmetric encryption only earns its cost when the party encrypting shouldn't be
-  able to decrypt. Here the same application does both, so there's no separation of
-  duty to protect — AES-256 stays, and `encryption_algorithm` records the real
-  cipher name rather than a signing algorithm that was never fit for this job.
-- **`NotFound` is reused deliberately**, for a destroyed key exactly as for any
-  missing row, rather than introducing a `shredded?`/tombstone signal. The deletion
-  *is* the erasure — no soft-delete flag, no separate state to keep in sync. The
-  cost of that choice is the one called out above: the library can't tell "key
-  shredded" apart from any other `NotFound` a projection's `apply` might raise.
-- **No key cache.** Every read does one `KeyStore#fetch` plus one symmetric unwrap —
-  hydrating an aggregate with several events under the same key does one fetch per
-  event rather than one per unique key. A real cost on long streams, deliberately
-  traded away for a first iteration; it can be reintroduced later inside
-  `EncryptionKeyManager#open`/`#seal` without changing the on-disk format or any
-  public signature.
-- **The application key must stay stable for the lifetime of the store.** Nothing
-  enforces this — generating it fresh on every process start (rather than loading it
-  from a stable secret) silently makes every previously wrapped data key
-  unreadable, which looks identical to shredding. This bit the bundled
-  `examples/financial-transaction` example itself before it was fixed to read
-  `APPLICATION_ENCRYPTION_KEY` from the environment.
+Bodies are sealed with AES-256-CBC and an encrypt-then-MAC HMAC-SHA256 tag. An
+encrypted body is stored as `{"iv": "<b64>", "ct": "<b64>", "tag": "<b64>"}` — the
+header's `encryption_key_id` is what marks a body as encrypted, not a field on the
+body itself, so encrypted and plaintext bodies coexist in one store with no migration
+needed to turn encryption on for new events. Each ciphertext is bound to its own event
+and its own key, so an envelope can't be moved to another row or opened under a
+header naming a different key.
 
 ---
 
