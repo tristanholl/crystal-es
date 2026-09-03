@@ -10,13 +10,13 @@ module ES
         skip = @db.query_one %(SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgmq')), as: Bool
         return true if skip
 
-        m = Array(String).new
-        m << %( CREATE SCHEMA IF NOT EXISTS "pgmq"; )
-        m << %( CREATE EXTENSION pgmq cascade; )
-        m << %( DROP TRIGGER IF EXISTS "queue_event_#{@name}" ON "eventstore"."events"; )
-        m << %( DROP FUNCTION IF EXISTS "eventstore"."queue_event_#{@name}" CASCADE; )
-        m << %( SELECT FROM "pgmq"."create"('#{@name}'); )
-        m << %(
+        migrations = Array(String).new
+        migrations << %( CREATE SCHEMA IF NOT EXISTS "pgmq"; )
+        migrations << %( CREATE EXTENSION pgmq cascade; )
+        migrations << %( DROP TRIGGER IF EXISTS "queue_event_#{@name}" ON "eventstore"."events"; )
+        migrations << %( DROP FUNCTION IF EXISTS "eventstore"."queue_event_#{@name}" CASCADE; )
+        migrations << %( SELECT FROM "pgmq"."create"('#{@name}'); )
+        migrations << %(
 CREATE OR REPLACE FUNCTION "eventstore"."queue_event_#{@name}" ()
   RETURNS TRIGGER
   AS $trigger$
@@ -28,7 +28,7 @@ END;
 $trigger$
 LANGUAGE plpgsql;
         )
-        m << %(
+        migrations << %(
 CREATE OR REPLACE TRIGGER "queue_event_#{@name}"
   AFTER INSERT
   ON "eventstore"."events"
@@ -36,7 +36,7 @@ FOR EACH ROW
     EXECUTE PROCEDURE "eventstore"."queue_event_#{@name}"();
         )
 
-        m.each { |s| @db.exec s }
+        migrations.each { |statement| @db.exec statement }
       end
 
       # Archives a message from the queue

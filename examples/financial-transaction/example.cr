@@ -56,7 +56,6 @@ store.setup
 
 # Intialize projection database
 ES::Config.projection_database = db
-projection_database = ES::Config.projection_database
 
 # Initialize projection
 p = Projections::Ledger.new

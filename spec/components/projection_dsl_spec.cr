@@ -45,14 +45,14 @@ describe ES::ProjectionDSL do
 
     it "includes all columns with correct names" do
       parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
-      names = parsed["columns"].as_a.map { |c| c["name"].as_s }
+      names = parsed["columns"].as_a.map(&.["name"].as_s)
       names.should eq(["id", "name", "amount", "comment", "score", "active", "created_at"])
     end
 
     it "maps Crystal types to the correct SQL types" do
       parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
       cols = parsed["columns"].as_a
-      col = ->(name : String) { cols.find! { |c| c["name"].as_s == name } }
+      col = ->(name : String) { cols.find! { |column| column["name"].as_s == name } }
 
       col.call("id")["sql_type"].as_s.should eq("SERIAL")
       col.call("name")["sql_type"].as_s.should eq("TEXT")
@@ -65,7 +65,7 @@ describe ES::ProjectionDSL do
     it "records the Crystal source type for each column" do
       parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
       cols = parsed["columns"].as_a
-      col = ->(name : String) { cols.find! { |c| c["name"].as_s == name } }
+      col = ->(name : String) { cols.find! { |column| column["name"].as_s == name } }
 
       col.call("id")["crystal_type"].as_s.should eq("Int32")
       col.call("name")["crystal_type"].as_s.should eq("String")
@@ -77,7 +77,7 @@ describe ES::ProjectionDSL do
     it "records nullability" do
       parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
       cols = parsed["columns"].as_a
-      col = ->(name : String) { cols.find! { |c| c["name"].as_s == name } }
+      col = ->(name : String) { cols.find! { |column| column["name"].as_s == name } }
 
       col.call("name")["null"].as_bool.should be_false
       col.call("comment")["null"].as_bool.should be_true
@@ -86,16 +86,16 @@ describe ES::ProjectionDSL do
     it "records defaults" do
       parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
       cols = parsed["columns"].as_a
-      active = cols.find! { |c| c["name"].as_s == "active" }
+      active = cols.find! { |column| column["name"].as_s == "active" }
       active["default"].as_bool.should be_true
 
-      no_default = cols.find! { |c| c["name"].as_s == "name" }
+      no_default = cols.find! { |column| column["name"].as_s == "name" }
       no_default["default"].raw.should be_nil
     end
 
     it "includes all indexes with correct names" do
       parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
-      idx_names = parsed["indexes"].as_a.map { |i| i["name"].as_s }
+      idx_names = parsed["indexes"].as_a.map(&.["name"].as_s)
       idx_names.should contain("postings_name_idx")
       idx_names.should contain("postings_name_amount_uidx")
     end
@@ -152,15 +152,12 @@ describe ES::ProjectionMeta do
       end
 
       changes = ES::ProjectionMeta.diff(stored, shorter)
-      changes.any? { |c| c.kind == "column_removed" && c.severity == "breaking" }.should be_true
+      changes.any? { |change| change.kind == "column_removed" && change.severity == "breaking" }.should be_true
     end
 
     it "detects an added column as breaking" do
-      stored = ProjectionDSLTestV2.compiled_definition
-      compiled = ProjectionDSLTest.compiled_definition # has more columns
-
-      # stored has 4 columns, ProjectionDSLTest has 7 — so positions differ
-      # Use a simpler pair: same base + one extra
+      # ProjectionDSLTestV2 has 4 columns and ProjectionDSLTest has 7, so their
+      # positions differ. Compare a simpler pair instead: same base, one extra.
       base = ProjectionDSLTestV2.compiled_definition
       parsed = JSON.parse(base)
       extra_col = JSON.parse(%({"name":"extra","sql_type":"TEXT","primary_key":false,"null":true,"default":null,"position":4}))
@@ -174,17 +171,17 @@ describe ES::ProjectionMeta do
       end
 
       changes = ES::ProjectionMeta.diff(base, longer)
-      changes.any? { |c| c.kind == "column_added" && c.severity == "breaking" }.should be_true
+      changes.any? { |change| change.kind == "column_added" && change.severity == "breaking" }.should be_true
     end
 
     it "detects a column type change as breaking" do
       base = ProjectionDSLTestV2.compiled_definition
       parsed = JSON.parse(base)
-      cols = parsed["columns"].as_a.map do |c|
-        if c["name"].as_s == "amount"
+      cols = parsed["columns"].as_a.map do |column|
+        if column["name"].as_s == "amount"
           JSON.parse(%({"name":"amount","sql_type":"TEXT","primary_key":false,"null":false,"default":null,"position":2}))
         else
-          c
+          column
         end
       end
       modified = JSON.build do |j|
@@ -196,7 +193,7 @@ describe ES::ProjectionMeta do
       end
 
       changes = ES::ProjectionMeta.diff(base, modified)
-      changes.any? { |c| c.kind == "column_type_changed" && c.severity == "breaking" }.should be_true
+      changes.any? { |change| change.kind == "column_type_changed" && change.severity == "breaking" }.should be_true
     end
 
     it "detects a Crystal type change as breaking even when sql_type is identical" do
@@ -204,11 +201,11 @@ describe ES::ProjectionMeta do
       # but they differ in crystal_type and must be caught.
       base = ProjectionDSLTestV2.compiled_definition
       parsed = JSON.parse(base)
-      cols = parsed["columns"].as_a.map do |c|
-        if c["name"].as_s == "id"
+      cols = parsed["columns"].as_a.map do |column|
+        if column["name"].as_s == "id"
           JSON.parse(%({"name":"id","sql_type":"SERIAL","crystal_type":"Int64","primary_key":true,"null":false,"default":null,"position":0}))
         else
-          c
+          column
         end
       end
       modified = JSON.build do |j|
@@ -220,17 +217,17 @@ describe ES::ProjectionMeta do
       end
 
       changes = ES::ProjectionMeta.diff(base, modified)
-      changes.any? { |c| c.kind == "column_crystal_type_changed" && c.severity == "breaking" }.should be_true
+      changes.any? { |change| change.kind == "column_crystal_type_changed" && change.severity == "breaking" }.should be_true
     end
 
     it "detects a primary_key change as breaking" do
       base = ProjectionDSLTestV2.compiled_definition
       parsed = JSON.parse(base)
-      cols = parsed["columns"].as_a.map do |c|
-        if c["name"].as_s == "id"
+      cols = parsed["columns"].as_a.map do |column|
+        if column["name"].as_s == "id"
           JSON.parse(%({"name":"id","sql_type":"SERIAL","crystal_type":"Int32","primary_key":false,"null":false,"default":null,"position":0}))
         else
-          c
+          column
         end
       end
       modified = JSON.build do |j|
@@ -242,7 +239,7 @@ describe ES::ProjectionMeta do
       end
 
       changes = ES::ProjectionMeta.diff(base, modified)
-      changes.any? { |c| c.kind == "column_primary_key_changed" && c.severity == "breaking" }.should be_true
+      changes.any? { |change| change.kind == "column_primary_key_changed" && change.severity == "breaking" }.should be_true
     end
 
     it "detects a removed index as non_breaking" do
@@ -257,8 +254,8 @@ describe ES::ProjectionMeta do
       end
 
       changes = ES::ProjectionMeta.diff(stored, no_indexes)
-      changes.any? { |c| c.kind == "index_removed" && c.severity == "non_breaking" }.should be_true
-      changes.none? { |c| c.severity == "breaking" }.should be_true
+      changes.any? { |change| change.kind == "index_removed" && change.severity == "non_breaking" }.should be_true
+      changes.none? { |change| change.severity == "breaking" }.should be_true
     end
 
     it "detects an added index as non_breaking" do
@@ -274,8 +271,8 @@ describe ES::ProjectionMeta do
       end
 
       changes = ES::ProjectionMeta.diff(base, with_extra)
-      changes.any? { |c| c.kind == "index_added" && c.severity == "non_breaking" }.should be_true
-      changes.none? { |c| c.severity == "breaking" }.should be_true
+      changes.any? { |change| change.kind == "index_added" && change.severity == "non_breaking" }.should be_true
+      changes.none? { |change| change.severity == "breaking" }.should be_true
     end
   end
 end

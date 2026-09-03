@@ -6,11 +6,20 @@ authors:
 
 crystal: '>= 1.14.0'
 
+# Build the Ameba linter binary into ./bin with `shards build ameba`.
+# This target is only used for local/CI linting and is ignored by consumers.
+targets:
+  ameba:
+    main: lib/ameba/bin/ameba.cr
+
 dependencies:
   db:
     github: crystal-lang/crystal-db
 
 development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
+    version: ~> 1.7.0
   pg:
     github: will/crystal-pg
 

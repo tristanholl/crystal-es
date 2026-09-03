@@ -6,7 +6,7 @@ end
 
 class AnotherProjection < ES::Projection
   def truncate_proxy
-    self.truncate
+    truncate
   end
 end
 

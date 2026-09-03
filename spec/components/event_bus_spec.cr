@@ -17,7 +17,7 @@ describe ES::EventBus do
     )
 
     eb.subscribe(DummyEvent, DummyReactor)
-    eb.subscribed?(DummyEvent, DummyReactor).should eq(true)
+    eb.subscribed?(DummyEvent, DummyReactor).should be_true
   end
 
   it "can unsubscribe" do
@@ -28,7 +28,7 @@ describe ES::EventBus do
 
     eb.subscribe(DummyEvent, DummyReactor)
     eb.unsubscribe(DummyEvent, DummyReactor)
-    eb.subscribed?(DummyEvent, DummyReactor).should eq(false)
+    eb.subscribed?(DummyEvent, DummyReactor).should be_false
   end
 
   it "delivers published events to subscribed reactors" do
@@ -61,7 +61,7 @@ describe ES::EventBus do
       event_handlers: ES::EventHandlers.new
     )
 
-    eb.subscribed?(DummyEvent, DummyReactor).should eq(false)
+    eb.subscribed?(DummyEvent, DummyReactor).should be_false
   end
 
   it "does not deliver twice when the same handler is subscribed twice" do
