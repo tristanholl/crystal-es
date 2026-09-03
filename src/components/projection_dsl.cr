@@ -7,13 +7,13 @@ module ES
     end
 
     macro apply(event_type, &block)
-      def apply(event : {{event_type}})
+      def apply(event : {{ event_type }})
         header = event.header
         aggregate_id = event.header.aggregate_id
         aggregate_version = event.header.aggregate_version
         created_at = event.header.created_at
-        body = event.body.as({{event_type}}::Body)
-        {{block.body}}
+        body = event.body.as({{ event_type }}::Body)
+        {{ block.body }}
       end
     end
 
@@ -22,9 +22,9 @@ module ES
     end
 
     macro define_projection(table, init = false, batch_size = 1000_i64, &block)
-      @@table = {{table}}
-      @@init = {{init}}
-      @@projection_batch_size = {{batch_size}}.to_i64
+      @@table = {{ table }}
+      @@init = {{ init }}
+      @@projection_batch_size = {{ batch_size }}.to_i64
 
       {%
         parts = table.split(".")
@@ -46,7 +46,7 @@ module ES
       def self.compiled_definition : String
         JSON.build do |json|
           json.object do
-            json.field "table", {{table}}
+            json.field "table", {{ table }}
             json.field "columns" do
               json.array do
                 {% for col_def, col_i in cols %}
@@ -89,17 +89,17 @@ module ES
                     {% sql_type = "TEXT" %}
                   {% end %}
                   json.object do
-                    json.field "name", "{{col_name}}"
-                    json.field "sql_type", {{sql_type}}
-                    json.field "crystal_type", {{col_type_str}}
-                    json.field "primary_key", {{is_primary}}
-                    json.field "null", {{is_null}}
+                    json.field "name", "{{ col_name }}"
+                    json.field "sql_type", {{ sql_type }}
+                    json.field "crystal_type", {{ col_type_str }}
+                    json.field "primary_key", {{ is_primary }}
+                    json.field "null", {{ is_null }}
                     {% if has_default %}
-                      json.field "default", {{default_val}}
+                      json.field "default", {{ default_val }}
                     {% else %}
                       json.field "default" { json.null }
                     {% end %}
-                    json.field "position", {{col_i}}
+                    json.field "position", {{ col_i }}
                   end
                 {% end %}
               end
@@ -118,15 +118,15 @@ module ES
                     json.field "columns" do
                       json.array do
                         {% for idx_col in idx_cols %}
-                          json.string "{{idx_col.id}}"
+                          json.string "{{ idx_col.id }}"
                         {% end %}
                       end
                     end
-                    json.field "unique", {{is_unique}}
+                    json.field "unique", {{ is_unique }}
                     {% if idx_name %}
-                      json.field "name", {{idx_name}}
+                      json.field "name", {{ idx_name }}
                     {% else %}
-                      json.field "name", "{{table_name.id}}_{% for idx_col, idx_ci in idx_cols %}{{idx_col.id}}{% if idx_ci < idx_cols.size - 1 %}_{% end %}{% end %}_idx"
+                      json.field "name", "{{ table_name.id }}_{% for idx_col, idx_ci in idx_cols %}{{ idx_col.id }}{% if idx_ci < idx_cols.size - 1 %}_{% end %}{% end %}_idx"
                     {% end %}
                   end
                 {% end %}
@@ -141,7 +141,7 @@ module ES
       end
 
       def self.drift_status(db : DB::Database) : ES::ProjectionMeta::DriftStatus
-        meta_helper = ES::ProjectionMeta.new(db, {{schema_name}})
+        meta_helper = ES::ProjectionMeta.new(db, {{ schema_name }})
         meta_helper.setup
         stored = meta_helper.fetch(self.name)
 
@@ -172,7 +172,7 @@ module ES
 
       private def create_projection_table
         @projection_database.exec %(
-          CREATE TABLE "{{schema_name.id}}"."{{table_name.id}}" (
+          CREATE TABLE "{{ schema_name.id }}"."{{ table_name.id }}" (
             {% for col_def, col_i in cols %}
               {% col_name = col_def.args[0].id %}
               {% col_type_str = col_def.args[1].stringify %}
@@ -212,7 +212,7 @@ module ES
               {% else %}
                 {% sql_type = "TEXT" %}
               {% end %}
-              "{{col_name}}" {{sql_type.id}} {% if is_primary %}PRIMARY KEY{% elsif is_null %}NULL{% else %}NOT NULL{% end %}{% if has_default %} DEFAULT {% if default_val.is_a?(StringLiteral) %}'{{default_val.id}}'{% else %}{{default_val}}{% end %}{% end %}{% if col_i < cols.size - 1 %},{% end %}
+              "{{ col_name }}" {{ sql_type.id }} {% if is_primary %}PRIMARY KEY{% elsif is_null %}NULL{% else %}NOT NULL{% end %}{% if has_default %} DEFAULT {% if default_val.is_a?(StringLiteral) %}'{{ default_val.id }}'{% else %}{{ default_val }}{% end %}{% end %}{% if col_i < cols.size - 1 %},{% end %}
             {% end %}
           )
         )
@@ -225,12 +225,12 @@ module ES
             {% if idx_opt.name.stringify == "unique" %}{% is_unique = idx_opt.value %}{% end %}
             {% if idx_opt.name.stringify == "name" %}{% idx_name = idx_opt.value %}{% end %}
           {% end %}
-          @projection_database.exec %(CREATE{% if is_unique %} UNIQUE{% end %} INDEX {% if idx_name %}{{idx_name.id}}{% else %}{{table_name.id}}_{% for idx_col, idx_ci in idx_cols %}{{idx_col.id}}{% if idx_ci < idx_cols.size - 1 %}_{% end %}{% end %}_idx{% end %} ON "{{schema_name.id}}"."{{table_name.id}}"({% for idx_col, idx_ci in idx_cols %}{{idx_col.id}}{% if idx_ci < idx_cols.size - 1 %}, {% end %}{% end %}))
+          @projection_database.exec %(CREATE{% if is_unique %} UNIQUE{% end %} INDEX {% if idx_name %}{{ idx_name.id }}{% else %}{{ table_name.id }}_{% for idx_col, idx_ci in idx_cols %}{{ idx_col.id }}{% if idx_ci < idx_cols.size - 1 %}_{% end %}{% end %}_idx{% end %} ON "{{ schema_name.id }}"."{{ table_name.id }}"({% for idx_col, idx_ci in idx_cols %}{{ idx_col.id }}{% if idx_ci < idx_cols.size - 1 %}, {% end %}{% end %}))
         {% end %}
       end
 
       def setup_table
-        meta_helper = ES::ProjectionMeta.new(@projection_database, {{schema_name}})
+        meta_helper = ES::ProjectionMeta.new(@projection_database, {{ schema_name }})
         meta_helper.setup
 
         compiled_fp  = self.class.compiled_fingerprint
@@ -260,7 +260,7 @@ module ES
         end
 
         skip = @projection_database.query_one(
-          %(SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = '{{schema_name.id}}' AND tablename = '{{table_name.id}}')),
+          %(SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = '{{ schema_name.id }}' AND tablename = '{{ table_name.id }}')),
           as: Bool
         )
         create_projection_table unless skip

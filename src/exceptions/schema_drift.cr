@@ -14,7 +14,7 @@ module ES
         @compiled_fingerprint : String,
         @changes : Array(ES::ProjectionMeta::SchemaChange),
       )
-        change_summary = @changes.map { |c| "  [#{c.severity}] #{c.kind}: #{c.description}" }.join("\n")
+        change_summary = @changes.map { |change| "  [#{change.severity}] #{change.kind}: #{change.description}" }.join("\n")
         message = "Schema drift detected for '#{@projection_class}' (table: #{@table_name}).\n" \
                   "Stored fingerprint:   #{@stored_fingerprint}\n" \
                   "Compiled fingerprint: #{@compiled_fingerprint}\n" \

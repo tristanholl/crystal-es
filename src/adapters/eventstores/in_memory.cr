@@ -71,7 +71,7 @@ module ES
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new
 
-        @events.each do |event_id, event|
+        @events.each_value do |event|
           event_header = JSON.parse(event.header.to_json)
           event_body = JSON.parse(event.body.to_json)
 

@@ -1,0 +1,30 @@
+# Ameba configuration for crystal-es
+# https://github.com/crystal-ameba/ameba
+#
+# Everything not listed here runs with Ameba's default settings. Rules are only
+# turned off below when they conflict with an established convention of this
+# code base, and each one carries the reason.
+
+# Files the linter inspects. Dependencies in `lib` and the compiled linter in
+# `bin` are never our code, so they stay out.
+Globs:
+  - "**/*.cr"
+  - "!lib"
+  - "!bin"
+
+# The adapters build their migration SQL with `%( ... )` string literals so the
+# statements line up with the surrounding Crystal code. Switching them to
+# heredocs would churn every migration for no readability gain.
+Style/MultilineStringLiteral:
+  Enabled: false
+
+# `ES::Aggregate::State#set_type` is part of the published aggregate API and
+# renaming it to `type=` would break every aggregate that calls it.
+Naming/AccessorMethodName:
+  Enabled: false
+
+# Several public readers are plain `Bool` getters (`ES::Exception::Error#print_backtrace`,
+# `ES::ProjectionMeta::Record#verified`). Converting them to `getter?` would
+# remove the current accessors from the shard's public surface.
+Naming/QueryBoolMethods:
+  Enabled: false

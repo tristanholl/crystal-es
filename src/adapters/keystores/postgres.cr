@@ -10,9 +10,9 @@ module ES
         skip = @db.query_one %(SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'eventstore' AND tablename = 'encryption_keys');), as: Bool
         return true if skip
 
-        m = Array(String).new
-        m << %( CREATE SCHEMA IF NOT EXISTS "eventstore"; )
-        m << %(
+        migrations = Array(String).new
+        migrations << %( CREATE SCHEMA IF NOT EXISTS "eventstore"; )
+        migrations << %(
           CREATE TABLE "eventstore"."encryption_keys" (
             "id"                             UUID PRIMARY KEY,
             "encryption_private_key"         BYTEA       NOT NULL,
@@ -26,7 +26,7 @@ module ES
         # SELECT grants the eventstore hands to pg_monitor are deliberately not
         # extended to this table.
 
-        m.each { |s| @db.exec s }
+        migrations.each { |statement| @db.exec statement }
       end
 
       # Stores a wrapped key and returns its id

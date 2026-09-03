@@ -24,7 +24,7 @@ describe "encrypted events in an event store" do
     # Reaching past the adapter on purpose: this asserts what is actually at rest,
     # which is the whole point of the feature.
     raw = store.@events[event.header.event_id]
-    raw.body.as_h.keys.sort.should eq(["ct", "iv", "tag"])
+    raw.body.as_h.keys.sort!.should eq(["ct", "iv", "tag"])
     raw.body.to_json.includes?("iban-of-a-real-person").should be_false
   end
 
@@ -110,7 +110,8 @@ describe "encrypted events in an event store" do
     # existence in the codebase has no bearing on a store with no encryption
     # configured, as long as nothing ever tries to append one.
     store.append(PlainEvent.new(actor_id: nil, command_handler: "handler", secret: "unaffected"))
-    store.fetch_event(store.last_event_id.not_nil!).body["secret"].as_s.should eq("unaffected")
+    last_event_id = store.last_event_id.should_not be_nil
+    store.fetch_event(last_event_id).body["secret"].as_s.should eq("unaffected")
 
     # The moment such an event is actually appended, the failure is loud and
     # immediate — never a silent plaintext write under an encrypted-looking body.

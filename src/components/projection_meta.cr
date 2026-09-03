@@ -28,7 +28,7 @@ module ES
       end
 
       def breaking? : Bool
-        @changes.any? { |c| c.severity == "breaking" }
+        @changes.any? { |change| change.severity == "breaking" }
       end
     end
 
@@ -64,11 +64,11 @@ module ES
           "recorded_at"       TIMESTAMPTZ NOT NULL DEFAULT now(),
           CONSTRAINT projection_meta_pk PRIMARY KEY ("projection_class")
         )
-      SQL
+        SQL
       @db.exec <<-SQL
         CREATE UNIQUE INDEX IF NOT EXISTS crystal_es_projection_metadata_table_name_uidx
           ON "#{@schema}"."#{META_TABLE}" ("table_name")
-      SQL
+        SQL
     end
 
     def fetch(projection_class : String) : MetaRow?
@@ -77,7 +77,7 @@ module ES
         projection_class,
         as: {String, String, String, String, Time}
       )
-      return nil if result.nil?
+      return if result.nil?
       pc, tn, fp, defn, recorded = result
       MetaRow.new(
         projection_class: pc,
@@ -95,63 +95,87 @@ module ES
       )
     end
 
+    # Compares a stored projection definition against the compiled one and
+    # reports every schema change between them.
     def self.diff(stored : String, compiled : String) : Array(SchemaChange)
-      changes = [] of SchemaChange
-
       stored_def = JSON.parse(stored)
       compiled_def = JSON.parse(compiled)
 
-      stored_cols = stored_def["columns"].as_a
-      compiled_cols = compiled_def["columns"].as_a
+      changes = diff_columns(stored_def["columns"].as_a, compiled_def["columns"].as_a)
+      changes.concat(diff_indexes(stored_def["indexes"].as_a, compiled_def["indexes"].as_a))
+      changes
+    end
+
+    # Column order is part of the projection schema, so the two lists are walked
+    # position by position and a moved column counts as a breaking change.
+    private def self.diff_columns(stored_cols : Array(JSON::Any), compiled_cols : Array(JSON::Any)) : Array(SchemaChange)
+      changes = [] of SchemaChange
 
       max_size = [stored_cols.size, compiled_cols.size].max
       max_size.times do |i|
-        sc = stored_cols[i]?
-        cc = compiled_cols[i]?
+        stored_col = stored_cols[i]?
+        compiled_col = compiled_cols[i]?
 
-        if sc && cc.nil?
+        if stored_col && compiled_col.nil?
           changes << SchemaChange.new("breaking", "column_removed",
-            "Column '#{sc["name"]}' at position #{i} was removed")
-        elsif cc && sc.nil?
+            "Column '#{stored_col["name"]}' at position #{i} was removed")
+        elsif compiled_col && stored_col.nil?
           changes << SchemaChange.new("breaking", "column_added",
-            "Column '#{cc["name"]}' was added at position #{i}")
-        elsif sc && cc
-          if sc["name"] != cc["name"]
+            "Column '#{compiled_col["name"]}' was added at position #{i}")
+        elsif stored_col && compiled_col
+          if stored_col["name"] != compiled_col["name"]
             changes << SchemaChange.new("breaking", "column_order_changed",
-              "Column at position #{i} changed from '#{sc["name"]}' to '#{cc["name"]}'")
+              "Column at position #{i} changed from '#{stored_col["name"]}' to '#{compiled_col["name"]}'")
           else
-            col_name = sc["name"].as_s
-            if sc["sql_type"] != cc["sql_type"]
-              changes << SchemaChange.new("breaking", "column_type_changed",
-                "Column '#{col_name}' type changed from #{sc["sql_type"]} to #{cc["sql_type"]}")
-            end
-            if sc["null"] != cc["null"]
-              changes << SchemaChange.new("breaking", "column_nullability_changed",
-                "Column '#{col_name}' nullability changed from null=#{sc["null"]} to null=#{cc["null"]}")
-            end
-            if sc["default"] != cc["default"]
-              changes << SchemaChange.new("breaking", "column_default_changed",
-                "Column '#{col_name}' default changed from #{sc["default"]} to #{cc["default"]}")
-            end
-            if sc["primary_key"] != cc["primary_key"]
-              changes << SchemaChange.new("breaking", "column_primary_key_changed",
-                "Column '#{col_name}' primary_key changed from #{sc["primary_key"]} to #{cc["primary_key"]}")
-            end
-            sc_ct = sc["crystal_type"]?
-            cc_ct = cc["crystal_type"]?
-            if sc_ct && cc_ct && sc_ct != cc_ct
-              changes << SchemaChange.new("breaking", "column_crystal_type_changed",
-                "Column '#{col_name}' Crystal type changed from #{sc_ct} to #{cc_ct}")
-            end
+            changes.concat(diff_column_attributes(stored_col, compiled_col))
           end
         end
       end
 
-      stored_idxs = stored_def["indexes"].as_a
-      compiled_idxs = compiled_def["indexes"].as_a
+      changes
+    end
 
-      stored_names = stored_idxs.map { |idx| idx["name"].as_s }
-      compiled_names = compiled_idxs.map { |idx| idx["name"].as_s }
+    # Compares the attributes of a single column that kept both its name and its
+    # position. Every attribute change here is breaking: the table would have to
+    # be altered for the projection to keep writing to it.
+    private def self.diff_column_attributes(stored_col : JSON::Any, compiled_col : JSON::Any) : Array(SchemaChange)
+      changes = [] of SchemaChange
+      col_name = stored_col["name"].as_s
+
+      if stored_col["sql_type"] != compiled_col["sql_type"]
+        changes << SchemaChange.new("breaking", "column_type_changed",
+          "Column '#{col_name}' type changed from #{stored_col["sql_type"]} to #{compiled_col["sql_type"]}")
+      end
+      if stored_col["null"] != compiled_col["null"]
+        changes << SchemaChange.new("breaking", "column_nullability_changed",
+          "Column '#{col_name}' nullability changed from null=#{stored_col["null"]} to null=#{compiled_col["null"]}")
+      end
+      if stored_col["default"] != compiled_col["default"]
+        changes << SchemaChange.new("breaking", "column_default_changed",
+          "Column '#{col_name}' default changed from #{stored_col["default"]} to #{compiled_col["default"]}")
+      end
+      if stored_col["primary_key"] != compiled_col["primary_key"]
+        changes << SchemaChange.new("breaking", "column_primary_key_changed",
+          "Column '#{col_name}' primary_key changed from #{stored_col["primary_key"]} to #{compiled_col["primary_key"]}")
+      end
+
+      stored_crystal_type = stored_col["crystal_type"]?
+      compiled_crystal_type = compiled_col["crystal_type"]?
+      if stored_crystal_type && compiled_crystal_type && stored_crystal_type != compiled_crystal_type
+        changes << SchemaChange.new("breaking", "column_crystal_type_changed",
+          "Column '#{col_name}' Crystal type changed from #{stored_crystal_type} to #{compiled_crystal_type}")
+      end
+
+      changes
+    end
+
+    # Indexes are matched by name rather than by position, and none of their
+    # changes are breaking: an index can be dropped and recreated in place.
+    private def self.diff_indexes(stored_idxs : Array(JSON::Any), compiled_idxs : Array(JSON::Any)) : Array(SchemaChange)
+      changes = [] of SchemaChange
+
+      stored_names = stored_idxs.map(&.["name"].as_s)
+      compiled_names = compiled_idxs.map(&.["name"].as_s)
 
       (stored_names - compiled_names).each do |name|
         changes << SchemaChange.new("non_breaking", "index_removed", "Index '#{name}' was removed")
@@ -162,9 +186,9 @@ module ES
       end
 
       (stored_names & compiled_names).each do |name|
-        s_idx = stored_idxs.find { |idx| idx["name"].as_s == name }.not_nil!
-        c_idx = compiled_idxs.find { |idx| idx["name"].as_s == name }.not_nil!
-        if s_idx["columns"] != c_idx["columns"] || s_idx["unique"] != c_idx["unique"]
+        stored_idx = stored_idxs.find! { |idx| idx["name"].as_s == name }
+        compiled_idx = compiled_idxs.find! { |idx| idx["name"].as_s == name }
+        if stored_idx["columns"] != compiled_idx["columns"] || stored_idx["unique"] != compiled_idx["unique"]
           changes << SchemaChange.new("non_breaking", "index_changed",
             "Index '#{name}' definition changed")
         end

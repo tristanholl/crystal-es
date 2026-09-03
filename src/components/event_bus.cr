@@ -22,8 +22,8 @@ module ES
 
     # Subscribe an array of event handlers to an event
     def subscribe(event_class : ES::Event.class, handlers : Array(T))
-      handlers.each do |r|
-        subscribe(event_class, r)
+      handlers.each do |handler|
+        subscribe(event_class, handler)
       end
     end
 

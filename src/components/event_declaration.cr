@@ -51,7 +51,7 @@ module ES
             {% if r.resolve? == ::ES::Event %}
               return true
             {% else %}
-              return true if event_class <= {{r}}
+              return true if event_class <= {{ r }}
             {% end %}
           {% end %}
         {% end %}

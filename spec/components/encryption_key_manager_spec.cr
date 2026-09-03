@@ -11,7 +11,7 @@ describe ES::EncryptionKeyManager do
 
       body = JSON.parse(encryption.seal(event))
 
-      body.as_h.keys.sort.should eq(["ct", "iv", "tag"])
+      body.as_h.keys.sort!.should eq(["ct", "iv", "tag"])
       body.to_json.includes?("iban-of-a-real-person").should be_false
     end
 

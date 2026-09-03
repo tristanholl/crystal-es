@@ -10,14 +10,14 @@ module ES
         skip = @db.query_one %(SELECT EXISTS (SELECT FROM pg_tables WHERE  schemaname = 'eventstore' AND tablename  = 'events');), as: Bool
         return true if skip
 
-        m = Array(String).new
-        m << %( CREATE SCHEMA IF NOT EXISTS "eventstore"; )
-        m << %( GRANT USAGE ON SCHEMA "eventstore" TO pg_monitor; )
-        m << %( GRANT SELECT ON ALL TABLES IN SCHEMA "eventstore" TO pg_monitor; )
-        m << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA "eventstore" TO pg_monitor; )
-        m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON TABLES TO pg_monitor; )
-        m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON SEQUENCES TO pg_monitor; )
-        m << %(
+        migrations = Array(String).new
+        migrations << %( CREATE SCHEMA IF NOT EXISTS "eventstore"; )
+        migrations << %( GRANT USAGE ON SCHEMA "eventstore" TO pg_monitor; )
+        migrations << %( GRANT SELECT ON ALL TABLES IN SCHEMA "eventstore" TO pg_monitor; )
+        migrations << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA "eventstore" TO pg_monitor; )
+        migrations << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON TABLES TO pg_monitor; )
+        migrations << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON SEQUENCES TO pg_monitor; )
+        migrations << %(
           CREATE TABLE "eventstore"."events" (
             "id" BIGSERIAL PRIMARY KEY,
             "header" jsonb NOT NULL,
@@ -25,9 +25,9 @@ module ES
           );
         )
 
-        m << %(CREATE UNIQUE INDEX aggregate_id_version_idx ON "eventstore"."events"((header->>'aggregate_id'), (header->>'aggregate_version'));)
+        migrations << %(CREATE UNIQUE INDEX aggregate_id_version_idx ON "eventstore"."events"((header->>'aggregate_id'), (header->>'aggregate_version'));)
 
-        m << %(
+        migrations << %(
           CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened"
           AS
           SELECT
@@ -46,7 +46,7 @@ module ES
             e.header ->> 'aggregate_version' ASC;
         )
 
-        m.each { |s| @db.exec s }
+        migrations.each { |statement| @db.exec statement }
       end
 
       # Appends an event to the event stream

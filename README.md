@@ -630,6 +630,39 @@ docker-compose up -d   # starts PostgreSQL
 make test              # run the spec suite
 ```
 
+### Coding standards
+
+Two tools guard the code style, and both run in CI on every push and pull
+request:
+
+- `crystal tool format`, the formatter that ships with the compiler.
+- [Ameba](https://github.com/crystal-ameba/ameba), a static analyser for
+  Crystal that catches code smells, dead assignments and constructs that work
+  but read badly.
+
+```bash
+make lint          # formatter check + Ameba, the same pair CI runs
+make lint-format   # formatter check only
+make lint-ameba    # Ameba only
+make lint-fix      # rewrite files: format, then auto-correct what Ameba can
+```
+
+Ameba is a development dependency, so `shards install` pulls it in. The binary
+is compiled into `bin/ameba` by `shards build ameba` and is baked into the dev
+image, which is why `make lint` starts instantly rather than compiling the
+linter first.
+
+Rules are configured in [`.ameba.yml`](.ameba.yml). It runs Ameba's defaults
+apart from three rules that are switched off, each with the reason next to it in
+the file: two of them would rename accessors that are part of this shard's
+public API, and the third would rewrite every migration's SQL literal as a
+heredoc. A single line can be exempted in place instead of globally:
+
+```crystal
+# ameba:disable Naming/BlockParameterName
+items.each { |x| puts x }
+```
+
 ---
 
 ## Contributing
@@ -637,8 +670,9 @@ make test              # run the spec suite
 1. Fork it (<https://github.com/tristanholl/crystal-es/fork>)
 2. Create your feature branch (`git checkout -b my-new-feature`)
 3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin my-new-feature`)
-5. Create a new Pull Request
+4. Run `make test` and `make lint` — CI runs both and will reject a red branch
+5. Push to the branch (`git push origin my-new-feature`)
+6. Create a new Pull Request
 
 ## Contributors
 

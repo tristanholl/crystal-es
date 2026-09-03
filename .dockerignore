@@ -1,0 +1,14 @@
+.git
+.github
+
+# Installed by `shards install` and compiled by `shards build` inside the image
+lib
+bin
+.shards
+shard.lock
+
+# Local state that must never end up in an image layer
+storage
+.env-dev
+.env-test
+*.dwarf

@@ -35,7 +35,6 @@ class Projections::Ledger < ES::Projection
 
     b = event.body.as(Events::TransactionInitiated::Body)
     amount_value = b.amount
-    creditor_account = b.creditor_account
     debtor_account = b.debtor_account
 
     insert_postings(
@@ -118,14 +117,14 @@ class Projections::Ledger < ES::Projection
     skip = @projection_database.query_one %(SELECT EXISTS (SELECT FROM pg_tables WHERE  schemaname = 'projections' AND tablename  = 'postings');), as: Bool
     return if skip
 
-    m = Array(String).new
-    m << %( CREATE SCHEMA IF NOT EXISTS "projections"; )
-    m << %( GRANT USAGE ON SCHEMA "projections" TO pg_monitor; )
-    m << %( GRANT SELECT ON ALL TABLES IN SCHEMA "projections" TO pg_monitor; )
-    m << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA "projections" TO pg_monitor; )
-    m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "projections" GRANT SELECT ON TABLES TO pg_monitor; )
-    m << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "projections" GRANT SELECT ON SEQUENCES TO pg_monitor; )
-    m.each { |s| @projection_database.exec s }
+    migrations = Array(String).new
+    migrations << %( CREATE SCHEMA IF NOT EXISTS "projections"; )
+    migrations << %( GRANT USAGE ON SCHEMA "projections" TO pg_monitor; )
+    migrations << %( GRANT SELECT ON ALL TABLES IN SCHEMA "projections" TO pg_monitor; )
+    migrations << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA "projections" TO pg_monitor; )
+    migrations << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "projections" GRANT SELECT ON TABLES TO pg_monitor; )
+    migrations << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "projections" GRANT SELECT ON SEQUENCES TO pg_monitor; )
+    migrations.each { |statement| @projection_database.exec statement }
   end
 
   private def insert_postings(
@@ -136,8 +135,8 @@ class Projections::Ledger < ES::Projection
     created_at : Time,
     posting_uuid : UUID,
     transaction_uuid : UUID,
-    accepted_at : (Time | Nil) = nil,
-    rejected_at : (Time | Nil) = nil,
+    accepted_at : Time? = nil,
+    rejected_at : Time? = nil,
   )
     creditor_amount_value = amount_value # Amount that is posted on creditor side
     debtor_amount_value = -amount_value  # Amount that is posted on debtor side

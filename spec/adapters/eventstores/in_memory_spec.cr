@@ -11,7 +11,7 @@ describe ES::EventStoreAdapters::InMemory do
     store.append(e3)
 
     collected = [] of UUID
-    store.each_event { |ev| collected << UUID.new(ev.header["event_id"].as_s) }
+    store.each_event { |event| collected << UUID.new(event.header["event_id"].as_s) }
     collected.should eq([e1.header.event_id, e2.header.event_id, e3.header.event_id])
   end
 
@@ -25,7 +25,7 @@ describe ES::EventStoreAdapters::InMemory do
     store.append(e3)
 
     collected = [] of UUID
-    store.each_event(until_event_id: e2.header.event_id) { |ev| collected << UUID.new(ev.header["event_id"].as_s) }
+    store.each_event(until_event_id: e2.header.event_id) { |event| collected << UUID.new(event.header["event_id"].as_s) }
     collected.should eq([e1.header.event_id, e2.header.event_id])
   end
 

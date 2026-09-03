@@ -37,9 +37,9 @@ module ES
     # Receive loop to read messages from the queue
     private def receive_loop(polling_sleep : Time::Span, visibility_timeout : Time::Span, batch_size : Int32)
       loop do
-        read(timeout: visibility_timeout, count: batch_size).each do |m|
+        read(timeout: visibility_timeout, count: batch_size).each do |message|
           # Push received message to the channel
-          @channel.send(m)
+          @channel.send(message)
         end
 
         sleep polling_sleep
