@@ -8,6 +8,6 @@ describe "ES::CommandHandler" do
     )
 
     handler.handle(DummyCommand.new)
-    handler.handled.should be_true
+    handler.handled?.should be_true
   end
 end

@@ -94,7 +94,7 @@ end
 
 # Default Command Handler — generic over its command type
 class DummyCommandHandler < ES::CommandHandler(DummyCommand)
-  getter handled : Bool = false
+  getter? handled : Bool = false
 
   def handle(command : DummyCommand)
     @handled = true

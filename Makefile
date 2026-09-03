@@ -21,6 +21,9 @@ COMPOSE_TEST_ARGS := -f $(COMPOSE_TEST_FILE) -p $(COMPOSE_PROJECT_NAME)
 dc        = $(COMPOSE_CMD) $(COMPOSE_ARGS) $(1)
 dct       = $(COMPOSE_CMD) $(COMPOSE_TEST_ARGS) $(1)
 dc-run    = $(call dc, run --entrypoint "bash -c" --rm cmd $(1))
+# Same as dc-run but without starting linked services, for targets that need the
+# mounted working tree and nothing else (no database).
+dc-run-solo = $(call dc, run --no-deps --entrypoint "bash -c" --rm cmd $(1))
 dct-run    = $(call dct, run --entrypoint "bash -c" --rm cmd $(1))
 dc-exec   = $(call dc, exec console $(1))
 
@@ -155,7 +158,7 @@ lint-ameba:
 # This one runs on the dev compose file because that is the one that mounts the
 # working tree, so the rewrites land on the host instead of in a discarded layer.
 lint-fix: env
-	$(call dc-run, "shards check >/dev/null 2>&1 || shards install; [ -x ./bin/ameba ] || shards build ameba; crystal tool format; ./bin/ameba --fix")
+	$(call dc-run-solo, "shards check >/dev/null 2>&1 || shards install; [ -x ./bin/ameba ] || shards build ameba; crystal tool format; ./bin/ameba --fix")
 
 docker-info:
 	docker -v

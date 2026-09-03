@@ -17,6 +17,9 @@ dependencies:
     github: crystal-lang/crystal-db
 
 development_dependencies:
+  # Ameba 1.7 needs Crystal >= 1.19 to compile, which is newer than the `crystal`
+  # floor above. That floor is what consumers of this shard need; development
+  # dependencies are not installed for them, and Dockerfile.dev pins 1.20.2.
   ameba:
     github: crystal-ameba/ameba
     version: ~> 1.7.0
