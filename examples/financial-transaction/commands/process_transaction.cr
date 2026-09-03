@@ -16,7 +16,7 @@ class Commands::ProcessTransactionHandler < ES::CommandHandler(Commands::Process
     aggregate.hydrate
 
     # Return if the aggregate is in a final state
-    return if aggregate.state.accepted
+    return if aggregate.state.accepted?
 
     # Extract aggregate state attributes to local variables
     next_version = aggregate.state.next_version

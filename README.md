@@ -652,11 +652,25 @@ is compiled into `bin/ameba` by `shards build ameba` and is baked into the dev
 image, which is why `make lint` starts instantly rather than compiling the
 linter first.
 
-Rules are configured in [`.ameba.yml`](.ameba.yml). It runs Ameba's defaults
-apart from three rules that are switched off, each with the reason next to it in
-the file: two of them would rename accessors that are part of this shard's
-public API, and the third would rewrite every migration's SQL literal as a
-heredoc. A single line can be exempted in place instead of globally:
+Ameba 1.7 itself needs Crystal >= 1.19, which is newer than the `>= 1.14.0`
+floor in `shard.yml`. That floor is what applications *using* this shard need —
+`shards install` does not pull a dependency's development dependencies, so it is
+unaffected. It only matters if you lint outside Docker on an older compiler; the
+dev image pins 1.20.2, so every `make` target is fine.
+
+Rules are configured in [`.ameba.yml`](.ameba.yml), which runs Ameba's defaults
+with two relaxations, each explained next to it in the file:
+
+- `Style/MultilineStringLiteral` is off, because it would rewrite every adapter
+  migration's `%( ... )` SQL literal as a heredoc.
+- `Naming/AccessorMethodName` and `Naming/QueryBoolMethods` stay on but are
+  exempted for the three files holding accessors that are already part of the
+  shard's public API. New code is still checked by both.
+
+Note that Ameba ignores rule names it does not recognise, so a typo in that file
+silently disables nothing — re-run `make lint-ameba` after editing it.
+
+A single line can be exempted in place instead of globally:
 
 ```crystal
 # ameba:disable Naming/BlockParameterName

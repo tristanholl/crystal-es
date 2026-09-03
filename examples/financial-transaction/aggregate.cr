@@ -7,8 +7,8 @@ class Aggregate < ES::Aggregate
     property debtor_account : UUID?
     property encryption_key_id : UUID?
 
-    property accepted : Bool = false
-    property rejected : Bool = false
+    property? accepted : Bool = false
+    property? rejected : Bool = false
   end
 
   getter state : State
