@@ -5,7 +5,7 @@ module ES
     end
 
     macro define_event(event_type, event_handle, encrypted = false)
-      define_event({{event_type}}, {{event_handle}}, {{encrypted}}) do
+      define_event({{ event_type }}, {{ event_handle }}, {{ encrypted }}) do
       end
     end
 

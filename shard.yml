@@ -1,16 +1,28 @@
 name: crystal-es
-version: 0.9.0
+version: 0.9.1
 
 authors:
   - Tristan Holl <mail@tristanholl.com>
 
 crystal: '>= 1.14.0'
 
+# Build the Ameba linter binary into ./bin with `shards build ameba`.
+# This target is only used for local/CI linting and is ignored by consumers.
+targets:
+  ameba:
+    main: lib/ameba/bin/ameba.cr
+
 dependencies:
   db:
     github: crystal-lang/crystal-db
 
 development_dependencies:
+  # Ameba 1.7 needs Crystal >= 1.19 to compile, which is newer than the `crystal`
+  # floor above. That floor is what consumers of this shard need; development
+  # dependencies are not installed for them, and Dockerfile.dev pins 1.20.2.
+  ameba:
+    github: crystal-ameba/ameba
+    version: ~> 1.7.0
   pg:
     github: will/crystal-pg
 

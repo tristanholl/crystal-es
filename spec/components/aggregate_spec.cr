@@ -107,39 +107,39 @@ describe ES::Aggregate do
 
   it "increases the aggregate version for unhandled event for non-strict stream handling" do
     store = ES::EventStoreAdapters::InMemory.new
-    dummyEvent = DummyEvent.new
-    aggregate_id = dummyEvent.header.aggregate_id
+    dummy_event = DummyEvent.new
+    aggregate_id = dummy_event.header.aggregate_id
 
     aggr = DummyAggregate.new(aggregate_id, store, reject_unhandled_events: false)
 
-    aggr.apply(dummyEvent)
+    aggr.apply(dummy_event)
 
     aggr.state.version.should eq(1)
   end
 
   it "fails to apply the same event twice" do
     store = ES::EventStoreAdapters::InMemory.new
-    dummyEvent = DummyEvent.new
-    aggregate_id = dummyEvent.header.aggregate_id
+    dummy_event = DummyEvent.new
+    aggregate_id = dummy_event.header.aggregate_id
 
     aggr = DummyAggregate.new(aggregate_id, store, reject_unhandled_events: false)
 
-    aggr.apply(dummyEvent)
+    aggr.apply(dummy_event)
 
     expect_raises(ES::Exception::InvalidState) do
-      aggr.apply(dummyEvent)
+      aggr.apply(dummy_event)
     end
   end
 
   it "raises an exception unhandled event for strict stream handling" do
     store = ES::EventStoreAdapters::InMemory.new
-    dummyEvent = DummyEvent.new
-    aggregate_id = dummyEvent.header.aggregate_id
+    dummy_event = DummyEvent.new
+    aggregate_id = dummy_event.header.aggregate_id
 
     aggr = DummyAggregate.new(aggregate_id, store, reject_unhandled_events: true)
 
     expect_raises(ES::Exception::InvalidEventStream) do
-      aggr.apply(dummyEvent)
+      aggr.apply(dummy_event)
     end
   end
 end

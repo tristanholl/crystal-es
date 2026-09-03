@@ -17,6 +17,10 @@ RUN shards install
 
 COPY ./ /crystal-es/lib
 
+# Precompile the Ameba linter into ./bin so `make lint` is a plain binary run
+# rather than a fresh compile on every invocation.
+RUN shards build ameba
+
 #
 # SERVICE 
 #

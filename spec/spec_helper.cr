@@ -7,7 +7,7 @@ module DBMock
   class Database < DB::Database
     def initialize
       @connection_options = DB::Connection::Options.new
-      @setup_connection = ->(conn : DB::Connection) { }
+      @setup_connection = ->(_conn : DB::Connection) { }
       @pool = uninitialized DB::Pool(DB::Connection)
     end
   end
@@ -94,7 +94,7 @@ end
 
 # Default Command Handler — generic over its command type
 class DummyCommandHandler < ES::CommandHandler(DummyCommand)
-  getter handled : Bool = false
+  getter? handled : Bool = false
 
   def handle(command : DummyCommand)
     @handled = true

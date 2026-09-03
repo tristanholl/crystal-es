@@ -36,8 +36,7 @@ describe ES::Exception::SchemaDrift do
       changes: changes,
     )
 
-    exception.message.should_not be_nil
-    message = exception.message.not_nil!
+    message = exception.message.should_not be_nil
 
     message.should contain("Ledger")
     message.should contain("finance.ledger")

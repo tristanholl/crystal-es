@@ -21,6 +21,9 @@ COMPOSE_TEST_ARGS := -f $(COMPOSE_TEST_FILE) -p $(COMPOSE_PROJECT_NAME)
 dc        = $(COMPOSE_CMD) $(COMPOSE_ARGS) $(1)
 dct       = $(COMPOSE_CMD) $(COMPOSE_TEST_ARGS) $(1)
 dc-run    = $(call dc, run --entrypoint "bash -c" --rm cmd $(1))
+# Same as dc-run but without starting linked services, for targets that need the
+# mounted working tree and nothing else (no database).
+dc-run-solo = $(call dc, run --no-deps --entrypoint "bash -c" --rm cmd $(1))
 dct-run    = $(call dct, run --entrypoint "bash -c" --rm cmd $(1))
 dc-exec   = $(call dc, exec console $(1))
 
@@ -40,7 +43,10 @@ help:
 	@echo "  docker-info  - Outputs the current docker and docker-compose version"
 	@echo "  down    			- Stop and remove containers and networks"
 	@echo "  env     			- Create .env-dev and .env-test files if they don't exist"
-	@echo "  lint    			- Runs the linter"
+	@echo "  lint    			- Runs the formatter check and Ameba"
+	@echo "  lint-ameba 		- Runs Ameba static analysis only"
+	@echo "  lint-fix 			- Formats the code and auto-corrects Ameba offences"
+	@echo "  lint-format 		- Runs the formatter check only"
 	@echo "  logs    			- Tail docker logs"
 	@echo "  rebuild 			  - Force rebuild of the Docker image"
 	@echo "  reset   			- Reset the local environment and rebuild from scratch"
@@ -135,9 +141,24 @@ test:
 test-clean:
 	$(call dct, down --remove-orphans -v)
 
-# Run Linter
-lint:
+# Run all linters
+lint: lint-format lint-ameba
+
+# Verify formatting without rewriting any file
+lint-format:
 	$(call dct-run, "crystal tool format --check")
+
+# Static analysis with Ameba (https://github.com/crystal-ameba/ameba).
+# The binary is baked into the dev image; it is only built here when the image
+# predates that or when the target is run against a bare checkout.
+lint-ameba:
+	$(call dct-run, "[ -x ./bin/ameba ] || shards build ameba; ./bin/ameba")
+
+# Format the code and auto-correct every Ameba offence that can be corrected.
+# This one runs on the dev compose file because that is the one that mounts the
+# working tree, so the rewrites land on the host instead of in a discarded layer.
+lint-fix: env
+	$(call dc-run-solo, "shards check >/dev/null 2>&1 || shards install; [ -x ./bin/ameba ] || shards build ameba; crystal tool format; ./bin/ameba --fix")
 
 docker-info:
 	docker -v
