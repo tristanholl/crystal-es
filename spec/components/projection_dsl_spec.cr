@@ -112,6 +112,20 @@ describe ES::ProjectionDSL do
     end
   end
 
+  describe "index_ddl" do
+    it "returns idempotent, schema-qualified CREATE INDEX statements" do
+      ProjectionDSLTest.index_ddl.should eq([
+        {"postings_name_idx", %(CREATE INDEX IF NOT EXISTS postings_name_idx ON "test"."postings" ("name"))},
+        {"postings_name_amount_uidx", %(CREATE UNIQUE INDEX IF NOT EXISTS postings_name_amount_uidx ON "test"."postings" ("name", "amount"))},
+      ])
+    end
+
+    it "uses the same index names as the compiled definition" do
+      parsed = JSON.parse(ProjectionDSLTest.compiled_definition)
+      ProjectionDSLTest.index_ddl.map(&.[0]).should eq(parsed["indexes"].as_a.map(&.["name"].as_s))
+    end
+  end
+
   describe "compiled_fingerprint" do
     it "returns a 64-character hex SHA-256 string" do
       fp = ProjectionDSLTest.compiled_fingerprint
@@ -273,6 +287,25 @@ describe ES::ProjectionMeta do
       changes = ES::ProjectionMeta.diff(base, with_extra)
       changes.any? { |change| change.kind == "index_added" && change.severity == "non_breaking" }.should be_true
       changes.none? { |change| change.severity == "breaking" }.should be_true
+    end
+
+    it "detects a changed index as non_breaking and names it" do
+      base = ProjectionDSLTestV2.compiled_definition
+      parsed = JSON.parse(base)
+      unique_idx = JSON.parse(%({"columns":["name"],"unique":true,"name":"postings_v2_name_idx"}))
+      changed = JSON.build do |j|
+        j.object do
+          j.field "table", parsed["table"].as_s
+          j.field "columns", parsed["columns"]
+          j.field "indexes", [unique_idx]
+        end
+      end
+
+      changes = ES::ProjectionMeta.diff(base, changed)
+      changes.size.should eq(1)
+      changes[0].kind.should eq("index_changed")
+      changes[0].severity.should eq("non_breaking")
+      changes[0].index_name.should eq("postings_v2_name_idx")
     end
   end
 end
