@@ -1,6 +1,12 @@
 module ES
   module EventStoreAdapters
     class Postgres < ES::EventStore
+      # Serves the lookups by event_id in `fetch_event` and `each_event(until_event_id:)`,
+      # which would otherwise scan the whole table, and enforces that event ids never repeat.
+      # The expression must stay identical to the one in those queries (no `::uuid` casts)
+      # or the planner will not use the index.
+      EVENT_ID_INDEX = %(CREATE UNIQUE INDEX IF NOT EXISTS events_event_id_idx ON "eventstore"."events"((header->>'event_id'));)
+
       # Initialize with a database connection and, optionally, payload encryption
       def initialize(@db : DB::Database, @encryption : ES::EncryptionKeyManager? = ES::Config.encryption?)
       end
@@ -8,7 +14,12 @@ module ES
       # Initializes the database with the necessary schema, table and permissions for the eventstore
       def setup
         skip = @db.query_one %(SELECT EXISTS (SELECT FROM pg_tables WHERE  schemaname = 'eventstore' AND tablename  = 'events');), as: Bool
-        return true if skip
+        if skip
+          # Stores created before the event_id index existed get it on their next setup.
+          # Fails if the store holds duplicate event ids, which should never happen.
+          @db.exec EVENT_ID_INDEX
+          return true
+        end
 
         migrations = Array(String).new
         migrations << %( CREATE SCHEMA IF NOT EXISTS "eventstore"; )
@@ -26,6 +37,7 @@ module ES
         )
 
         migrations << %(CREATE UNIQUE INDEX aggregate_id_version_idx ON "eventstore"."events"((header->>'aggregate_id'), (header->>'aggregate_version'));)
+        migrations << EVENT_ID_INDEX
 
         migrations << %(
           CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened"
