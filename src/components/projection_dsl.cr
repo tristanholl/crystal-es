@@ -42,16 +42,125 @@ module ES
         cols = entries.select { |e| e.name.stringify == "column" }
         idxs = entries.select { |e| e.name.stringify == "index" }
 
-        # One entry per declared index: [name, columns, unique]. Both the stored
-        # definition and the DDL are built from this list so they cannot diverge.
+        # One entry per declared index. Both the stored definition and the DDL
+        # are built from this list so they cannot diverge. Every option is a
+        # compile-time literal, so the generated SQL has no runtime input.
         idx_specs = idxs.map do |idx_def|
           idx_cols = idx_def.args[0]
+          if !idx_cols.is_a?(ArrayLiteral) || idx_cols.empty?
+            idx_def.raise "index expects a non-empty array of column symbols or expression strings, got: #{idx_cols}"
+          end
+          idx_cols.each do |idx_col|
+            if !idx_col.is_a?(SymbolLiteral) && !idx_col.is_a?(StringLiteral)
+              idx_def.raise "index entries must be column symbols (:email) or SQL expression strings (\"lower(email)\"), got: #{idx_col}"
+            end
+          end
+
           idx_opts = idx_def.named_args.is_a?(Nop) ? [] of Nil : idx_def.named_args
+          idx_opts.each do |idx_opt|
+            if !["unique", "name", "using", "opclass", "where", "include"].includes?(idx_opt.name.stringify)
+              idx_def.raise "unknown index option '#{idx_opt.name}'; expected one of: unique, name, using, opclass, where, include"
+            end
+          end
           unique_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "unique" }
           name_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "name" }
+          using_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "using" }
+          opclass_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "opclass" }
+          where_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "where" }
+          include_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "include" }
+
           is_unique = unique_opt ? unique_opt.value : false
-          idx_name = name_opt ? name_opt.value : (table_name + "_" + idx_cols.map(&.id.stringify).join("_") + "_idx")
-          [idx_name, idx_cols, is_unique]
+
+          # A string entry is a raw SQL expression, a symbol a column name.
+          is_expr = idx_cols.map(&.is_a?(StringLiteral))
+          col_texts = idx_cols.map { |idx_col| idx_col.is_a?(StringLiteral) ? idx_col : idx_col.id.stringify }
+
+          using = "btree"
+          if using_opt
+            if !using_opt.value.is_a?(SymbolLiteral) && !using_opt.value.is_a?(StringLiteral)
+              idx_def.raise "index using: must be one of :btree, :gin, :gist, :hash, got: #{using_opt.value}"
+            end
+            using = using_opt.value.id.stringify
+            if !["btree", "gin", "gist", "hash"].includes?(using)
+              idx_def.raise "index using: must be one of :btree, :gin, :gist, :hash, got: #{using_opt.value}"
+            end
+          end
+
+          # Normalised to one entry per column or expression, nil for none.
+          opclasses = idx_cols.map { nil }
+          if opclass_opt
+            opclass_val = opclass_opt.value
+            if opclass_val.is_a?(ArrayLiteral)
+              if opclass_val.size != idx_cols.size
+                idx_def.raise "index opclass: array has #{opclass_val.size} entries but the index has #{idx_cols.size} columns or expressions"
+              end
+              opclasses = opclass_val.map { |opc| opc.is_a?(NilLiteral) ? nil : opc }
+            else
+              opclasses = idx_cols.map { opclass_val }
+            end
+            opclasses = opclasses.map do |opc|
+              if opc.nil?
+                nil
+              else
+                if !opc.is_a?(SymbolLiteral) && !opc.is_a?(StringLiteral)
+                  idx_def.raise "index opclass: entries must be symbols or strings, got: #{opc}"
+                end
+                if !(opc.id.stringify =~ /\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/)
+                  idx_def.raise "index opclass: '#{opc.id}' is not a valid operator class name"
+                end
+                opc.id.stringify
+              end
+            end
+          end
+
+          where_val = nil
+          if where_opt
+            if !where_opt.value.is_a?(StringLiteral) || where_opt.value.empty?
+              idx_def.raise "index where: must be a non-empty string literal, got: #{where_opt.value}"
+            end
+            where_val = where_opt.value
+          end
+
+          include_cols = [] of Nil
+          if include_opt
+            if !include_opt.value.is_a?(ArrayLiteral) || include_opt.value.empty? || include_opt.value.any? { |inc| !inc.is_a?(SymbolLiteral) }
+              idx_def.raise "index include: must be a non-empty array of column symbols, got: #{include_opt.value}"
+            end
+            if !["btree", "gist"].includes?(using)
+              idx_def.raise "index include: is only supported with using: :btree or :gist, not :#{using.id}"
+            end
+            include_cols = include_opt.value.map(&.id.stringify)
+          end
+
+          # The generated name is derived from the column names only, so it
+          # would be wrong (or collide with a plain index) for anything else.
+          if !name_opt && (is_expr.includes?(true) || where_val || using != "btree")
+            idx_def.raise "index #{idx_cols} needs an explicit name: when it uses an expression, where: or using:"
+          end
+          idx_name = name_opt ? name_opt.value : (table_name + "_" + col_texts.join("_") + "_idx")
+
+          entry_sql = idx_cols.map_with_index do |idx_col, idx_ci|
+            base = idx_col.is_a?(StringLiteral) ? "(" + idx_col + ")" : "\"" + idx_col.id.stringify + "\""
+            opclasses[idx_ci] ? base + " " + opclasses[idx_ci] : base
+          end
+          sql = "CREATE" + (is_unique ? " UNIQUE" : "") + " INDEX IF NOT EXISTS " + idx_name.id.stringify +
+                " ON \"" + schema_name + "\".\"" + table_name + "\"" +
+                (using != "btree" ? " USING " + using : "") +
+                " (" + entry_sql.join(", ") + ")" +
+                (include_cols.empty? ? "" : " INCLUDE (" + include_cols.map { |inc| "\"" + inc + "\"" }.join(", ") + ")") +
+                (where_val ? " WHERE " + where_val : "")
+
+          {
+            name:        idx_name,
+            columns:     col_texts,
+            unique:      is_unique,
+            expressions: is_expr,
+            using:       using,
+            opclasses:   opclasses,
+            where:       where_val,
+            include:     include_cols,
+            sql:         sql,
+          }
         end
       %}
 
@@ -122,13 +231,37 @@ module ES
                   json.object do
                     json.field "columns" do
                       json.array do
-                        {% for idx_col in idx_spec[1] %}
-                          json.string "{{ idx_col.id }}"
+                        {% for idx_col in idx_spec[:columns] %}
+                          json.string {{ idx_col }}
                         {% end %}
                       end
                     end
-                    json.field "unique", {{ idx_spec[2] }}
-                    json.field "name", {{ idx_spec[0] }}
+                    json.field "unique", {{ idx_spec[:unique] }}
+                    json.field "name", {{ idx_spec[:name] }}
+                    # The fields below are written only when they differ from
+                    # their default, so a plain column index serialises exactly
+                    # as it did before they existed and keeps its fingerprint.
+                    {% if idx_spec[:expressions].includes?(true) %}
+                      json.field "expressions", {{ idx_spec[:expressions] }}
+                    {% end %}
+                    {% if idx_spec[:using] != "btree" %}
+                      json.field "using", {{ idx_spec[:using] }}
+                    {% end %}
+                    {% if idx_spec[:opclasses].any? { |opc| opc } %}
+                      json.field "opclass" do
+                        json.array do
+                          {% for opc in idx_spec[:opclasses] %}
+                            {% if opc %}json.string {{ opc }}{% else %}json.null{% end %}
+                          {% end %}
+                        end
+                      end
+                    {% end %}
+                    {% if idx_spec[:where] %}
+                      json.field "where", {{ idx_spec[:where] }}
+                    {% end %}
+                    {% unless idx_spec[:include].empty? %}
+                      json.field "include", {{ idx_spec[:include] }}
+                    {% end %}
                   end
                 {% end %}
               end
@@ -142,7 +275,7 @@ module ES
       def self.index_ddl : Array({String, String})
         [
           {% for idx_spec in idx_specs %}
-            { {{ idx_spec[0] }}, %(CREATE{% if idx_spec[2] %} UNIQUE{% end %} INDEX IF NOT EXISTS {{ idx_spec[0].id }} ON "{{ schema_name.id }}"."{{ table_name.id }}" ({% for idx_col, idx_ci in idx_spec[1] %}"{{ idx_col.id }}"{% if idx_ci < idx_spec[1].size - 1 %}, {% end %}{% end %})) },
+            { {{ idx_spec[:name] }}, {{ idx_spec[:sql] }} },
           {% end %}
         ] of {String, String}
       end

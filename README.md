@@ -194,7 +194,27 @@ end
 | `Time` | `TIMESTAMPTZ` |
 | `Bool` | `BOOLEAN` |
 
-**`index(columns, unique: false, name: nil)`** — add an index to the projection table.
+**`index(columns, unique: false, name: nil, using: :btree, opclass: nil, where: nil, include: nil)`** — add an index to the projection table.
+
+```crystal
+index [:email]                                                                      # plain btree, auto-named users_email_idx
+index ["lower(email)"], name: "users_email_lower_idx"                               # string entry = SQL expression
+index [:name], using: :gin, opclass: :gin_trgm_ops, name: "instruments_name_trgm_idx"
+index [:uuid], where: "status = 'open'", name: "tasks_open_uuid_idx"                # partial index
+index [:status], include: [:name], name: "tasks_status_cover_idx"                   # covering index
+index [:name, "lower(email)"], opclass: [:text_pattern_ops, nil], name: "users_mixed_idx"
+```
+
+- `columns`: a symbol is a column name; a string is a raw SQL expression, emitted as `(<expr>)`.
+- `using:` — `:btree` (default), `:gin`, `:gist` or `:hash`.
+- `opclass:` — one operator class for every entry, or an array with one entry (or `nil`) per column/expression.
+- `where:` — the predicate of a partial index.
+- `include:` — extra columns of a covering index (btree and gist only).
+- `name:` is required when the index uses an expression, `where:` or a non-btree `using:`, since the generated name is built from column names only.
+
+All values are compile-time literals and are checked when the projection compiles. Invalid options, an unknown `using:` or a missing `name:` are compile errors.
+
+Operator classes from extensions need the extension installed first. For example, `gin_trgm_ops` needs `CREATE EXTENSION pg_trgm`. crystal-es doesn't create extensions, because that usually needs elevated privileges. Install them in your database image or migrations; otherwise creating the index fails when the projection boots.
 
 **`apply(EventClass) { ... }`** — handle an event to update the read model. Declared on the class body, alongside `define_projection` rather than inside it. Within the block, `header`, `aggregate_id`, `aggregate_version`, `created_at` and `body` are pre-bound. A plain `def apply(event : EventClass)` works identically.
 
