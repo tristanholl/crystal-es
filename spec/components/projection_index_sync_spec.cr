@@ -95,6 +95,48 @@ class IndexSyncUniqueName < ES::Projection
   end
 end
 
+# v1 + one index of each non-plain kind
+class IndexSyncKinds < ES::Projection
+  include ES::ProjectionDSL
+
+  define_projection "index_sync.items" do
+    column :id, Int32, primary_key: true
+    column :name, String
+    column :amount, Int64
+
+    index [:name]
+    index [:name], using: :gin, opclass: :gin_trgm_ops, name: "items_name_trgm_idx"
+    index [:id], where: "amount > 0", name: "items_positive_id_idx"
+    index ["lower(name)"], name: "items_name_lower_idx"
+    index [:amount], include: [:name], name: "items_amount_cover_idx"
+  end
+
+  apply DummyEvent do
+    nil
+  end
+end
+
+# IndexSyncKinds with a different partial index predicate
+class IndexSyncKindsWhere < ES::Projection
+  include ES::ProjectionDSL
+
+  define_projection "index_sync.items" do
+    column :id, Int32, primary_key: true
+    column :name, String
+    column :amount, Int64
+
+    index [:name]
+    index [:name], using: :gin, opclass: :gin_trgm_ops, name: "items_name_trgm_idx"
+    index [:id], where: "amount < 0", name: "items_positive_id_idx"
+    index ["lower(name)"], name: "items_name_lower_idx"
+    index [:amount], include: [:name], name: "items_amount_cover_idx"
+  end
+
+  apply DummyEvent do
+    nil
+  end
+end
+
 module IndexSyncSpec
   URL = ENV["ES_TEST_DATABASE_URL"]?
   @@db : DB::Database?
@@ -106,6 +148,9 @@ module IndexSyncSpec
   def self.reset : Nil
     db.exec %(DROP SCHEMA IF EXISTS "index_sync" CASCADE)
     db.exec %(CREATE SCHEMA "index_sync")
+    # gin_trgm_ops comes from pg_trgm. crystal-es leaves creating extensions
+    # to the application; the test database does it here.
+    db.exec %(CREATE EXTENSION IF NOT EXISTS pg_trgm)
   end
 
   def self.boot(klass) : Nil
@@ -213,6 +258,36 @@ describe "ES::ProjectionDSL index sync" do
       expect_raises(Exception) { IndexSyncSpec.boot(IndexSyncUniqueName) }
 
       IndexSyncSpec.indexes.keys.should contain("items_amount_uidx")
+    end
+
+    it "creates GIN, partial, expression and covering indexes with the table" do
+      IndexSyncSpec.boot(IndexSyncKinds)
+
+      idx = IndexSyncSpec.indexes
+      idx["items_name_trgm_idx"].should eq("CREATE INDEX items_name_trgm_idx ON index_sync.items USING gin (name gin_trgm_ops)")
+      idx["items_positive_id_idx"].should eq("CREATE INDEX items_positive_id_idx ON index_sync.items USING btree (id) WHERE (amount > 0)")
+      idx["items_name_lower_idx"].should eq("CREATE INDEX items_name_lower_idx ON index_sync.items USING btree (lower(name))")
+      idx["items_amount_cover_idx"].should eq("CREATE INDEX items_amount_cover_idx ON index_sync.items USING btree (amount) INCLUDE (name)")
+    end
+
+    it "adds GIN, partial, expression and covering indexes to an existing projection" do
+      IndexSyncSpec.boot(IndexSyncV1)
+      IndexSyncSpec.record_previous(IndexSyncKinds, IndexSyncV1)
+      IndexSyncSpec.boot(IndexSyncKinds)
+
+      IndexSyncSpec.indexes.keys.should contain("items_name_trgm_idx")
+      IndexSyncSpec.indexes.keys.should contain("items_positive_id_idx")
+      IndexSyncSpec.indexes.keys.should contain("items_name_lower_idx")
+      IndexSyncSpec.indexes.keys.should contain("items_amount_cover_idx")
+      IndexSyncSpec.stored_fingerprint(IndexSyncKinds).should eq(IndexSyncKinds.compiled_fingerprint)
+    end
+
+    it "recreates a partial index whose predicate changed" do
+      IndexSyncSpec.boot(IndexSyncKinds)
+      IndexSyncSpec.record_previous(IndexSyncKindsWhere, IndexSyncKinds)
+      IndexSyncSpec.boot(IndexSyncKindsWhere)
+
+      IndexSyncSpec.indexes["items_positive_id_idx"].should contain("WHERE (amount < 0)")
     end
   end
 end

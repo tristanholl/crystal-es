@@ -190,13 +190,36 @@ module ES
       (stored_names & compiled_names).each do |name|
         stored_idx = stored_idxs.find! { |idx| idx["name"].as_s == name }
         compiled_idx = compiled_idxs.find! { |idx| idx["name"].as_s == name }
-        if stored_idx["columns"] != compiled_idx["columns"] || stored_idx["unique"] != compiled_idx["unique"]
+        stored_norm = normalize_index(stored_idx)
+        compiled_norm = normalize_index(compiled_idx)
+        changed_fields = INDEX_FIELDS.select { |field| stored_norm[field] != compiled_norm[field] }
+        unless changed_fields.empty?
           changes << SchemaChange.new("non_breaking", "index_changed",
-            "Index '#{name}' definition changed", name)
+            "Index '#{name}' definition changed (#{changed_fields.join(", ")})", name)
         end
       end
 
       changes
+    end
+
+    # Every index attribute that is part of its definition, in diff order
+    INDEX_FIELDS = %w[columns expressions unique using opclass where include]
+
+    # Fills in the default of every optional index field. The compiled
+    # definition omits fields that hold their default, and definitions stored
+    # before a field existed lack it too, so both must compare as the default.
+    private def self.normalize_index(idx : JSON::Any) : Hash(String, JSON::Any)
+      columns = idx["columns"].as_a
+      none = ->(value : JSON::Any) { JSON::Any.new(Array.new(columns.size) { value }) }
+      {
+        "columns"     => idx["columns"],
+        "expressions" => idx["expressions"]? || none.call(JSON::Any.new(false)),
+        "unique"      => idx["unique"]? || JSON::Any.new(false),
+        "using"       => idx["using"]? || JSON::Any.new("btree"),
+        "opclass"     => idx["opclass"]? || none.call(JSON::Any.new(nil)),
+        "where"       => idx["where"]? || JSON::Any.new(nil),
+        "include"     => idx["include"]? || JSON::Any.new([] of JSON::Any),
+      }
     end
   end
 end
