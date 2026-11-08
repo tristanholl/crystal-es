@@ -50,7 +50,7 @@ module ES
           unique_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "unique" }
           name_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "name" }
           is_unique = unique_opt ? unique_opt.value : false
-          idx_name = name_opt ? name_opt.value : (table_name + "_" + idx_cols.map { |idx_col| idx_col.id.stringify }.join("_") + "_idx")
+          idx_name = name_opt ? name_opt.value : (table_name + "_" + idx_cols.map(&.id.stringify).join("_") + "_idx")
           [idx_name, idx_cols, is_unique]
         end
       %}

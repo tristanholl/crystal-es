@@ -100,7 +100,7 @@ module IndexSyncSpec
   @@db : DB::Database?
 
   def self.db : DB::Database
-    @@db ||= DB.open(URL.not_nil!)
+    @@db ||= DB.open(URL || raise "ES_TEST_DATABASE_URL is not set")
   end
 
   def self.reset : Nil
@@ -127,8 +127,8 @@ module IndexSyncSpec
 
   def self.indexes : Hash(String, String)
     result = {} of String => String
-    db.query_each(%(SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'index_sync' AND tablename = 'items')) do |rs|
-      result[rs.read(String)] = rs.read(String)
+    db.query_each(%(SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'index_sync' AND tablename = 'items')) do |result_set|
+      result[result_set.read(String)] = result_set.read(String)
     end
     result
   end
