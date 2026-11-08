@@ -4,8 +4,10 @@ module ES
       getter severity : String # "breaking" | "non_breaking"
       getter kind : String     # "column_removed" | "column_type_changed" | ...
       getter description : String
+      # Name of the index the change applies to; nil for column changes.
+      getter index_name : String?
 
-      def initialize(@severity : String, @kind : String, @description : String)
+      def initialize(@severity : String, @kind : String, @description : String, @index_name : String? = nil)
       end
     end
 
@@ -170,7 +172,7 @@ module ES
     end
 
     # Indexes are matched by name rather than by position, and none of their
-    # changes are breaking: an index can be dropped and recreated in place.
+    # changes are breaking: `setup_table` drops and recreates them in place.
     private def self.diff_indexes(stored_idxs : Array(JSON::Any), compiled_idxs : Array(JSON::Any)) : Array(SchemaChange)
       changes = [] of SchemaChange
 
@@ -178,11 +180,11 @@ module ES
       compiled_names = compiled_idxs.map(&.["name"].as_s)
 
       (stored_names - compiled_names).each do |name|
-        changes << SchemaChange.new("non_breaking", "index_removed", "Index '#{name}' was removed")
+        changes << SchemaChange.new("non_breaking", "index_removed", "Index '#{name}' was removed", name)
       end
 
       (compiled_names - stored_names).each do |name|
-        changes << SchemaChange.new("non_breaking", "index_added", "Index '#{name}' was added")
+        changes << SchemaChange.new("non_breaking", "index_added", "Index '#{name}' was added", name)
       end
 
       (stored_names & compiled_names).each do |name|
@@ -190,7 +192,7 @@ module ES
         compiled_idx = compiled_idxs.find! { |idx| idx["name"].as_s == name }
         if stored_idx["columns"] != compiled_idx["columns"] || stored_idx["unique"] != compiled_idx["unique"]
           changes << SchemaChange.new("non_breaking", "index_changed",
-            "Index '#{name}' definition changed")
+            "Index '#{name}' definition changed", name)
         end
       end
 

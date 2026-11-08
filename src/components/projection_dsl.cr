@@ -41,6 +41,18 @@ module ES
 
         cols = entries.select { |e| e.name.stringify == "column" }
         idxs = entries.select { |e| e.name.stringify == "index" }
+
+        # One entry per declared index: [name, columns, unique]. Both the stored
+        # definition and the DDL are built from this list so they cannot diverge.
+        idx_specs = idxs.map do |idx_def|
+          idx_cols = idx_def.args[0]
+          idx_opts = idx_def.named_args.is_a?(Nop) ? [] of Nil : idx_def.named_args
+          unique_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "unique" }
+          name_opt = idx_opts.find { |idx_opt| idx_opt.name.stringify == "name" }
+          is_unique = unique_opt ? unique_opt.value : false
+          idx_name = name_opt ? name_opt.value : (table_name + "_" + idx_cols.map { |idx_col| idx_col.id.stringify }.join("_") + "_idx")
+          [idx_name, idx_cols, is_unique]
+        end
       %}
 
       def self.compiled_definition : String
@@ -106,34 +118,33 @@ module ES
             end
             json.field "indexes" do
               json.array do
-                {% for idx_def in idxs %}
-                  {% idx_cols = idx_def.args[0] %}
-                  {% is_unique = false %}
-                  {% idx_name = nil %}
-                  {% for idx_opt in (idx_def.named_args.is_a?(Nop) ? [] of Nil : idx_def.named_args) %}
-                    {% if idx_opt.name.stringify == "unique" %}{% is_unique = idx_opt.value %}{% end %}
-                    {% if idx_opt.name.stringify == "name" %}{% idx_name = idx_opt.value %}{% end %}
-                  {% end %}
+                {% for idx_spec in idx_specs %}
                   json.object do
                     json.field "columns" do
                       json.array do
-                        {% for idx_col in idx_cols %}
+                        {% for idx_col in idx_spec[1] %}
                           json.string "{{ idx_col.id }}"
                         {% end %}
                       end
                     end
-                    json.field "unique", {{ is_unique }}
-                    {% if idx_name %}
-                      json.field "name", {{ idx_name }}
-                    {% else %}
-                      json.field "name", "{{ table_name.id }}_{% for idx_col, idx_ci in idx_cols %}{{ idx_col.id }}{% if idx_ci < idx_cols.size - 1 %}_{% end %}{% end %}_idx"
-                    {% end %}
+                    json.field "unique", {{ idx_spec[2] }}
+                    json.field "name", {{ idx_spec[0] }}
                   end
                 {% end %}
               end
             end
           end
         end
+      end
+
+      # `{name, sql}` for every declared index. The SQL is idempotent
+      # (`IF NOT EXISTS`), so it is safe to run on every boot.
+      def self.index_ddl : Array({String, String})
+        [
+          {% for idx_spec in idx_specs %}
+            { {{ idx_spec[0] }}, %(CREATE{% if idx_spec[2] %} UNIQUE{% end %} INDEX IF NOT EXISTS {{ idx_spec[0].id }} ON "{{ schema_name.id }}"."{{ table_name.id }}" ({% for idx_col, idx_ci in idx_spec[1] %}"{{ idx_col.id }}"{% if idx_ci < idx_spec[1].size - 1 %}, {% end %}{% end %})) },
+          {% end %}
+        ] of {String, String}
       end
 
       def self.compiled_fingerprint : String
@@ -216,17 +227,34 @@ module ES
             {% end %}
           )
         )
+      end
 
-        {% for idx_def in idxs %}
-          {% idx_cols = idx_def.args[0] %}
-          {% is_unique = false %}
-          {% idx_name = nil %}
-          {% for idx_opt in (idx_def.named_args.is_a?(Nop) ? [] of Nil : idx_def.named_args) %}
-            {% if idx_opt.name.stringify == "unique" %}{% is_unique = idx_opt.value %}{% end %}
-            {% if idx_opt.name.stringify == "name" %}{% idx_name = idx_opt.value %}{% end %}
-          {% end %}
-          @projection_database.exec %(CREATE{% if is_unique %} UNIQUE{% end %} INDEX {% if idx_name %}{{ idx_name.id }}{% else %}{{ table_name.id }}_{% for idx_col, idx_ci in idx_cols %}{{ idx_col.id }}{% if idx_ci < idx_cols.size - 1 %}_{% end %}{% end %}_idx{% end %} ON "{{ schema_name.id }}"."{{ table_name.id }}"({% for idx_col, idx_ci in idx_cols %}{{ idx_col.id }}{% if idx_ci < idx_cols.size - 1 %}, {% end %}{% end %}))
-        {% end %}
+      # Drops the indexes in `drop` and then creates every declared index that
+      # does not exist yet, in one transaction. Running the creates on every
+      # boot also repairs indexes that are missing although the stored metadata
+      # lists them (dropped by hand, or recorded by a version that never built
+      # them). If a create fails, e.g. a unique index over duplicate rows, the
+      # drops are rolled back and the error propagates, so the caller never
+      # records the new definition.
+      private def sync_projection_indexes(drop : Array(String) = [] of String) : Nil
+        ddl = self.class.index_ddl
+        return if drop.empty? && ddl.empty?
+
+        @projection_database.transaction do |tx|
+          conn = tx.connection
+          drop.each do |name|
+            # Index names are unique per schema, not per table.
+            conn.exec %(DROP INDEX IF EXISTS "{{ schema_name.id }}".#{name})
+          end
+          ddl.each do |(name, sql)|
+            begin
+              conn.exec sql
+            rescue ex
+              Log.error { "Failed to create index '#{name}' for '#{self.class.name}': #{ex.message}" }
+              raise ex
+            end
+          end
+        end
       end
 
       def setup_table
@@ -252,8 +280,17 @@ module ES
                 ? "definition metadata was updated (no structural changes detected)" \
                 : changes.map(&.description).join(", ")
               Log.warn { "Non-breaking schema drift on '#{self.class.name}': #{reason}" }
+
+              # Removed indexes and indexes whose definition changed are
+              # dropped; the sync then (re)creates every declared index.
+              drop = changes.compact_map do |change|
+                change.index_name if change.kind.in?("index_removed", "index_changed")
+              end
+              sync_projection_indexes(drop)
               meta_helper.upsert(self.class.name, self.class.table, compiled_fp, compiled_def)
             end
+          else
+            sync_projection_indexes
           end
           init
           return
@@ -264,6 +301,7 @@ module ES
           as: Bool
         )
         create_projection_table unless skip
+        sync_projection_indexes
 
         meta_helper.upsert(self.class.name, self.class.table, compiled_fp, compiled_def)
         init
