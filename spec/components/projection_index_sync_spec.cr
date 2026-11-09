@@ -238,6 +238,27 @@ describe "ES::ProjectionDSL index sync" do
       IndexSyncSpec.indexes.keys.should contain("items_amount_uidx")
     end
 
+    it "recreates a dropped table although its metadata is stored" do
+      IndexSyncSpec.boot(IndexSyncV1)
+      IndexSyncSpec.db.exec %(DROP TABLE "index_sync"."items")
+
+      IndexSyncSpec.boot(IndexSyncV1)
+
+      IndexSyncSpec.indexes.keys.should contain("items_name_idx")
+      IndexSyncSpec.stored_fingerprint(IndexSyncV1).should eq(IndexSyncV1.compiled_fingerprint)
+    end
+
+    it "recreates a dropped table with the current definition after drift" do
+      IndexSyncSpec.boot(IndexSyncV1)
+      IndexSyncSpec.db.exec %(DROP TABLE "index_sync"."items")
+      IndexSyncSpec.record_previous(IndexSyncV2, IndexSyncV1)
+
+      IndexSyncSpec.boot(IndexSyncV2)
+
+      IndexSyncSpec.indexes["items_amount_uidx"].should contain("UNIQUE")
+      IndexSyncSpec.stored_fingerprint(IndexSyncV2).should eq(IndexSyncV2.compiled_fingerprint)
+    end
+
     it "raises and keeps the stored fingerprint when an index cannot be built" do
       IndexSyncSpec.boot(IndexSyncV1)
       IndexSyncSpec.db.exec %(INSERT INTO "index_sync"."items" (id, name, amount) VALUES (1, 'dup', 1), (2, 'dup', 2))

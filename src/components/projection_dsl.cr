@@ -397,7 +397,15 @@ module ES
         compiled_fp  = self.class.compiled_fingerprint
         compiled_def = self.class.compiled_definition
 
-        if stored = meta_helper.fetch(self.class.name)
+        table_exists = @projection_database.query_one(
+          %(SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = '{{ schema_name.id }}' AND tablename = '{{ table_name.id }}')),
+          as: Bool
+        )
+
+        # A table that is missing although metadata is stored (e.g. dropped by
+        # hand to force a rebuild) is recreated from the compiled definition;
+        # `init` then replays the events into the empty table.
+        if table_exists && (stored = meta_helper.fetch(self.class.name))
           if stored.fingerprint != compiled_fp
             changes = ES::ProjectionMeta.diff(stored.definition, compiled_def)
             if changes.any? { |c| c.severity == "breaking" }
@@ -429,11 +437,7 @@ module ES
           return
         end
 
-        skip = @projection_database.query_one(
-          %(SELECT EXISTS (SELECT FROM pg_tables WHERE schemaname = '{{ schema_name.id }}' AND tablename = '{{ table_name.id }}')),
-          as: Bool
-        )
-        create_projection_table unless skip
+        create_projection_table unless table_exists
         sync_projection_indexes
 
         meta_helper.upsert(self.class.name, self.class.table, compiled_fp, compiled_def)
