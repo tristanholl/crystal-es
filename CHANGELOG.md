@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.1
+
+### Fixed
+
+- **`setup` no longer blocks appends while it adds indexes to an existing Postgres store.** It used to build `events_event_id_idx`, `events_tags_idx` and `events_event_handle_idx` with a plain `CREATE INDEX`, which locks the events table against writes for the whole build. It now builds only the missing ones, with `CREATE INDEX CONCURRENTLY`.
+- **`setup` rebuilds an index of its own that a failed concurrent build left invalid,** instead of only warning about it. It builds the replacement under a temporary name (`<name>_rebuild`) and swaps it in once valid, so a unique index keeps enforcing uniqueness throughout. It leaves the index alone while an index build might still be running on the events table, or on Postgres before 12, where builds can't be seen, and keeps warning about every invalid index left.
+- **Setups of an existing store running at the same time take turns** through a Postgres session advisory lock. Concurrent setups could fail with `tuple concurrently updated`, and two concurrent index builds on one table deadlock.
+
+### Upgrading from 0.11.0
+
+- No code changes. On a store that lacks the indexes, `setup` still takes as long as the build, and a boot that runs it waits for it. Appends from other instances keep running meanwhile. A concurrent build also waits for every transaction in the database that started before it, so a session left idle in a transaction holds the boot up until it ends. You can still build the indexes yourself beforehand: `setup` builds nothing when they exist and are valid.
+- **Run `setup` of an existing store over a session-mode connection,** not through a pooler in transaction mode (PgBouncer `pool_mode = transaction`). The advisory lock is a session lock. Through such a pooler, it can be taken and released on different server sessions and left held, and every later `setup` then waits for it. The wait has no time limit, because a legitimate holder may be building an index for a long time. Every 30 seconds, `setup` logs a warning naming the backend that holds the lock.
+- The advisory lock key is `0x6372797365736978`. An application that uses the same key for its own advisory locks makes `setup` wait for them.
+- An invalid index named `events_event_id_idx`, `events_tags_idx` or `events_event_handle_idx` is now replaced at the next `setup`. Rename it first if you want to keep it for investigation. As before, building indexes needs a role that owns the events table.
+
 ## 0.11.0
 
 ### Added
