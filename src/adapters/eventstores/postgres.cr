@@ -22,6 +22,16 @@ module ES
       # compare against. One row per distinct tag value; rows are never deleted.
       TAG_VERSIONS_TABLE = %(CREATE TABLE IF NOT EXISTS "eventstore"."tag_versions" ("tag" TEXT PRIMARY KEY, "version" BIGINT NOT NULL);)
 
+      # The indexes `setup` adds to a store created before they existed, by name
+      private EXISTING_STORE_INDEXES = {
+        "events_event_id_idx"     => EVENT_ID_INDEX,
+        "events_tags_idx"         => TAGS_INDEX,
+        "events_event_handle_idx" => EVENT_HANDLE_INDEX,
+      }
+
+      # Session advisory lock that lets one `setup` of an existing store run at a time
+      private SETUP_LOCK = 0x6372_7973_6573_6978_i64
+
       # Initialize with a database connection and, optionally, payload encryption
       # and tag hashing
       def initialize(
@@ -35,17 +45,15 @@ module ES
       def setup
         skip = @db.query_one %(SELECT EXISTS (SELECT FROM pg_tables WHERE  schemaname = 'eventstore' AND tablename  = 'events');), as: Bool
         if skip
-          # Stores created before an index existed get it on their next setup. The
-          # event_id one fails if the store holds duplicate event ids, which should
-          # never happen. On a large store these builds block appends while they
-          # run; create them beforehand with CREATE INDEX CONCURRENTLY to avoid that.
-          @db.exec EVENT_ID_INDEX
-          @db.exec TAGS_INDEX
-          @db.exec EVENT_HANDLE_INDEX
-          @db.exec TAG_VERSIONS_TABLE
-          # Default privileges only cover tables created by the role that set
-          # them, which need not be the one running this setup
-          @db.exec %(GRANT SELECT ON "eventstore"."tag_versions" TO pg_monitor;)
+          # Concurrent DDL on the same objects fails ("tuple concurrently
+          # updated"), so setups running at the same time take turns
+          with_setup_lock do |connection|
+            connection.exec TAG_VERSIONS_TABLE
+            # Default privileges only cover tables created by the role that set
+            # them, which need not be the one running this setup
+            connection.exec %(GRANT SELECT ON "eventstore"."tag_versions" TO pg_monitor;)
+            build_missing_indexes(connection)
+          end
           warn_about_invalid_indexes
           return true
         end
@@ -93,17 +101,137 @@ module ES
         migrations.each { |statement| @db.exec statement }
       end
 
-      # A CREATE INDEX CONCURRENTLY that failed leaves an invalid index behind.
-      # `IF NOT EXISTS` skips it because the name exists, and queries then run
-      # without it, so it is reported rather than passed over in silence.
-      private def warn_about_invalid_indexes
-        names = @db.query_all(
+      # Holds the setup lock on one connection while the block runs, and runs
+      # every statement of the block on it, so setup needs one connection only.
+      # The lock is a session lock, which needs a session-mode connection, not
+      # one through a transaction-mode pooler.
+      #
+      # It is polled rather than waited on: a session waiting on a lock is in a
+      # transaction, which a concurrent index build in the lock holder has to
+      # wait for in turn. There is no time limit, since a legitimate holder may
+      # be building an index for a long time; the wait is logged instead.
+      private def with_setup_lock(&)
+        @db.using_connection do |connection|
+          polls = 0
+          until connection.query_one(%(SELECT pg_try_advisory_lock($1)), SETUP_LOCK, as: Bool)
+            if polls % 30 == 0
+              holders = connection.query_all(%(SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND objsubid = 1 AND ((classid::int8 << 32) | objid::int8) = $1), SETUP_LOCK, as: Int32)
+              Log.warn { "Waiting for another session to finish setting up the event store: advisory lock #{SETUP_LOCK} held by backend #{holders.join(", ")}" }
+            end
+            polls += 1
+            sleep 1.second
+          end
+
+          begin
+            yield connection
+          ensure
+            connection.exec %(SELECT pg_advisory_unlock($1)), SETUP_LOCK
+          end
+        end
+      end
+
+      # Stores created before an index existed get it on their next setup. The
+      # build runs CONCURRENTLY, so appends go on while it scans the table, and
+      # setup returns once it is done. The event_id one fails if the store holds
+      # duplicate event ids, which should never happen.
+      #
+      # Only missing indexes are built: a concurrent build deadlocks with one
+      # already running on the same table, even when its own index exists.
+      private def build_missing_indexes(connection : DB::Connection)
+        rebuild_invalid_indexes(connection)
+        existing = index_names(connection)
+        EXISTING_STORE_INDEXES.each do |name, statement|
+          next if existing.includes?(name)
+
+          if existing.includes?(rebuild_name(name))
+            # A rebuild that stopped between dropping the old index and renaming
+            # the new one, which is valid: invalid leftovers were dropped above
+            connection.exec %(ALTER INDEX "eventstore"."#{rebuild_name(name)}" RENAME TO "#{name}")
+          else
+            connection.exec concurrently(statement)
+          end
+        end
+      end
+
+      # Plain CREATE INDEX blocks writes to the table for the whole build. The
+      # public constants keep the plain form, which is what a new, empty store
+      # uses and what applications may already run themselves.
+      private def concurrently(statement : String) : String
+        concurrent = statement.sub(" INDEX IF NOT EXISTS ", " INDEX CONCURRENTLY IF NOT EXISTS ")
+        # Falling back to the plain form would block appends without a word
+        raise ES::Exception::InvalidState.new("Index statement cannot be made concurrent: #{statement}") if concurrent == statement
+        concurrent
+      end
+
+      private def rebuild_name(name : String) : String
+        "#{name}_rebuild"
+      end
+
+      # A CREATE INDEX CONCURRENTLY that failed leaves an invalid index behind,
+      # which would otherwise count as existing. An index of this store's own
+      # that is invalid is built again under a temporary name, and swaps places
+      # with the invalid one once valid. The invalid one may still enforce
+      # uniqueness, so dropping it first would let a repeated event id in.
+      #
+      # A build still running looks the same, so nothing happens while any
+      # concurrent index build might be running on the events table: rebuilding
+      # would deadlock with it. A build by another role shows no table, so it
+      # counts as one on the events table. The index is then left alone and
+      # `warn_about_invalid_indexes` reports it.
+      #
+      # Names in the DDL below come from EXISTING_STORE_INDEXES, never from input.
+      private def rebuild_invalid_indexes(connection : DB::Connection)
+        invalid = invalid_index_names(connection)
+        abandoned = invalid & EXISTING_STORE_INDEXES.keys
+        leftovers = invalid & EXISTING_STORE_INDEXES.keys.map { |name| rebuild_name(name) }
+        return if abandoned.empty? && leftovers.empty?
+        return if index_build_running?(connection)
+
+        leftovers.each do |name|
+          connection.exec %(DROP INDEX CONCURRENTLY IF EXISTS "eventstore"."#{name}")
+        end
+
+        abandoned.each do |name|
+          Log.warn { "Index 'eventstore.#{name}' is invalid, left by a failed concurrent build. Building it again." }
+          temporary = rebuild_name(name)
+          renamed = concurrently(EXISTING_STORE_INDEXES[name]).sub(" #{name} ON ", " #{temporary} ON ")
+          raise ES::Exception::InvalidState.new("Index statement cannot be renamed: #{name}") if renamed.includes?(" #{name} ON ")
+          connection.exec renamed
+          connection.exec %(DROP INDEX CONCURRENTLY IF EXISTS "eventstore"."#{name}")
+          connection.exec %(ALTER INDEX "eventstore"."#{temporary}" RENAME TO "#{name}")
+        end
+      end
+
+      # Builds can only be seen from Postgres 12 on. Before that, one might
+      # always be running.
+      private def index_build_running?(connection : DB::Connection) : Bool
+        return true if connection.query_one(%(SELECT current_setting('server_version_num')::int), as: Int32) < 120000
+
+        connection.query_one(
+          %(SELECT EXISTS (SELECT FROM pg_stat_progress_create_index WHERE datname = current_database() AND (relid IS NULL OR relid = '"eventstore"."events"'::regclass))),
+          as: Bool
+        )
+      end
+
+      private def index_names(connection : DB::Connection) : Array(String)
+        connection.query_all(
+          %(SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'eventstore'),
+          as: String
+        )
+      end
+
+      private def invalid_index_names(connection : DB::Connection | DB::Database) : Array(String)
+        connection.query_all(
           %(SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'eventstore' AND NOT i.indisvalid ORDER BY c.relname),
           as: String
         )
+      end
 
-        names.each do |name|
-          Log.warn { "Index 'eventstore.#{name}' is invalid, most likely from a failed CREATE INDEX CONCURRENTLY, and is not used by queries. Drop it and run setup again." }
+      # An invalid index is not used by queries, so one that setup could not
+      # rebuild is reported rather than passed over in silence
+      private def warn_about_invalid_indexes
+        invalid_index_names(@db).each do |name|
+          Log.warn { "Index 'eventstore.#{name}' is invalid and not used by queries: a CREATE INDEX CONCURRENTLY is still running or has failed. Once no build is running, setup rebuilds the indexes it owns; drop any other one yourself." }
         end
       end
 
