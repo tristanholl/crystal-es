@@ -28,9 +28,12 @@ The library provides:
 - **Events** — immutable facts with a type-safe DSL
 - **Projections** — read models built from event streams, with a schema DSL and schema drift detection
 - **Event Bus** — fan-out published events to reactors and projections
+- **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that nothing a decision depended on changed (see [Tags](#tags), [Querying by tag](#querying-by-tag) and [Conditional appends](#conditional-appends))
 - **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
 
-A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction).
+A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction). [`./examples/course-subscription`](./examples/course-subscription) shows dynamic consistency boundaries: course capacity and a per-student limit enforced together, unique hashed emails, and erasure.
+
+See the [changelog](./CHANGELOG.md) for upgrade notes between versions.
 
 ---
 
