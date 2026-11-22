@@ -16,6 +16,12 @@ module ES
       # Serves the type filter of `read`, including items that name types but no tags
       EVENT_HANDLE_INDEX = %(CREATE INDEX IF NOT EXISTS events_event_handle_idx ON "eventstore"."events"((header->>'event_handle'));)
 
+      # Namespace of the advisory locks taken by `append`, the first argument of
+      # the two-key `pg_advisory_xact_lock(int, int)`. Keeps them apart from any
+      # advisory locks the application takes with the one-key form or its own
+      # namespace.
+      LOCK_NAMESPACE = IO::ByteFormat::BigEndian.decode(Int32, Digest::SHA256.digest("crystal-es:append")[0, 4])
+
       # Initialize with a database connection and, optionally, payload encryption
       # and tag hashing
       def initialize(
@@ -96,9 +102,146 @@ module ES
         end
       end
 
-      # Appends an event to the event stream
+      # Lock keys one append may take one by one. A batch carrying more distinct
+      # tags and types takes the store-wide key exclusively instead: advisory
+      # locks live in Postgres' shared lock table, sized by
+      # `max_locks_per_transaction` (64 by default) times the connections, and a
+      # large import holding one per tag could exhaust it for the whole cluster.
+      MAX_LOCK_KEYS = 64
+
+      # Appends an event to the event stream and returns its position
       def append(event : ES::Event)
-        @db.exec %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2)), encode_header(event), encode_body(event)
+        append_batch([event.as(ES::Event)], nil)
+      end
+
+      # Appends a batch atomically, failing with `ES::Exception::Conflict` if the
+      # condition's query matches an event appended after its position.
+      #
+      # Positions come from a sequence, which hands them out in the order inserts
+      # start, not the order they commit, so checking and inserting in one
+      # statement would race. Instead, in one READ COMMITTED transaction:
+      #
+      # 1. Advisory locks (see `lock_plan`). A conditional append locks what its
+      #    query selects exclusively; every append locks what its events carry
+      #    shared. Plain appends never wait for each other, while a check waits
+      #    for any in-flight append of an event it could match, and blocks new
+      #    ones.
+      # 2. The check, as its own statement. Under READ COMMITTED each statement
+      #    takes a fresh snapshot, so it sees whatever committed while step 1
+      #    waited. Folded into the locking statement — or under REPEATABLE READ,
+      #    which is why the level is set explicitly — it would not.
+      # 3. The inserts.
+      #
+      # The check alone is not enough: a matching event can commit after a
+      # higher-positioned one the decision read, and below the position it checks
+      # after. `read` takes the same locks for that reason.
+      #
+      # Locks are keyed by stored tags — digests for hashed ones — so no
+      # plaintext value of a hashed tag is sent with them.
+      protected def append_batch(events : Array(ES::Event), condition : ES::AppendCondition?) : Int64
+        encoded = encode_events(events)
+        items = condition.try { |cond| encode_query(cond.fail_if_events_match) }
+        position = 0_i64
+
+        locked_transaction(lock_plan(encoded, items)) do |connection|
+          if condition && items
+            args = [] of DB::Any | Array(String)
+            sql = "SELECT EXISTS (SELECT 1 FROM \"eventstore\".\"events\" WHERE #{query_condition(items, args)}"
+            if after = condition.after
+              args << after
+              sql += %( AND id > $#{args.size})
+            end
+            sql += ")"
+
+            raise append_conflict(condition) if connection.query_one(sql, args: args, as: Bool)
+          end
+
+          encoded.each do |event|
+            position = connection.query_one(
+              %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2) RETURNING id::BIGINT),
+              event.header, event.body, as: Int64
+            )
+          end
+        end
+
+        position
+      end
+
+      # Runs the block in a READ COMMITTED transaction holding the given locks.
+      #
+      # All locks are taken by one statement, in the order given — `unnest` over
+      # a function scan yields the arrays in order, and no sort runs in between.
+      private def locked_transaction(plan : Array({Int32, Bool}), &)
+        keys = plan.map(&.[0])
+        exclusive = plan.map(&.[1])
+
+        @db.transaction do |tx|
+          connection = tx.connection
+          connection.exec %(SET TRANSACTION ISOLATION LEVEL READ COMMITTED)
+          connection.exec(
+            %(SELECT CASE WHEN t.exclusive THEN pg_advisory_xact_lock($1, t.key) ELSE pg_advisory_xact_lock_shared($1, t.key) END FROM unnest($2::int4[], $3::bool[]) AS t(key, exclusive)),
+            LOCK_NAMESPACE, keys, exclusive
+          )
+          yield connection
+        end
+      end
+
+      # The advisory locks to take, as `{key, exclusive}` sorted by key so two
+      # transactions can never wait on each other's locks in a cycle.
+      #
+      # Every append takes a shared lock on each tag and the type of every event
+      # it writes, plus one store-wide key. A condition — or a read — then only
+      # needs one exclusive lock per query item, on something every matching
+      # event's writer holds shared: one of the item's tags if it has any — an
+      # event matching the item carries all of them — else each of its types,
+      # else the store-wide key. It also takes the store-wide key shared, which
+      # is what a batch past `MAX_LOCK_KEYS` locks exclusively instead of its
+      # tags and types. Where a key is needed both ways, exclusive wins.
+      #
+      # Keys are 32-bit digests; two names sharing one only serialize appends
+      # that did not need to be, they never let a conflict through.
+      private def lock_plan(encoded : Array(EncodedEvent), items : Array(EncodedQueryItem)?) : Array({Int32, Bool})
+        modes = Hash(Int32, Bool).new
+
+        names = Set(String).new
+        encoded.each do |event|
+          names << "handle:#{event.handle}"
+          event.tags.each { |tag| names << "tag:#{tag}" }
+        end
+
+        if names.size > MAX_LOCK_KEYS
+          lock(modes, "*", exclusive: true)
+        else
+          lock(modes, "*", exclusive: false)
+          names.each { |name| lock(modes, name, exclusive: false) }
+        end
+
+        items.try &.each do |item|
+          lock(modes, "*", exclusive: false)
+
+          if tag = item.tags.min?
+            lock(modes, "tag:#{tag}", exclusive: true)
+          elsif !item.types.empty?
+            item.types.each { |type| lock(modes, "handle:#{type}", exclusive: true) }
+          else
+            lock(modes, "*", exclusive: true)
+          end
+        end
+
+        modes.to_a.sort_by!(&.[0])
+      end
+
+      private def lock(modes : Hash(Int32, Bool), name : String, exclusive : Bool)
+        key = self.class.lock_key(name)
+        modes[key] = exclusive || modes.fetch(key, false)
+      end
+
+      # The advisory lock key for a lock name — `"*"`, `"handle:<event handle>"`
+      # or `"tag:<stored tag>"` — taken under `LOCK_NAMESPACE`. Public because
+      # the locks are a protocol: anything else writing to the events table has
+      # to take them the same way for conditional appends to stay correct.
+      def self.lock_key(name : String) : Int32
+        IO::ByteFormat::BigEndian.decode(Int32, Digest::SHA256.digest(name)[0, 4])
       end
 
       # Returns a single event for a given id
@@ -168,7 +311,8 @@ module ES
         validate_read_options(after, limit)
         args = [] of DB::Any | Array(String)
 
-        sql = %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE #{query_condition(encode_query(query), args)})
+        items = encode_query(query)
+        sql = %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE #{query_condition(items, args)})
         if a = after
           args << a
           sql += %( AND id > $#{args.size})
@@ -179,9 +323,20 @@ module ES
           sql += %( LIMIT $#{args.size})
         end
 
-        @db.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any}).map do |id, header, body|
-          decode_or_erase(header, body, id)
+        # Read under the locks a conditional append on this query takes. Until
+        # the locks are granted, a matching append may be in flight with a
+        # position below one that already committed; once they are, none can be,
+        # and every later one gets a higher position than anything this returns.
+        # So `after: <last position read>` cannot skip an event the read missed.
+        # The SELECT has to run while the locks are held — released any earlier,
+        # a new append could take a lower position than one committing before the
+        # SELECT starts.
+        rows = [] of {Int64, JSON::Any, JSON::Any}
+        locked_transaction(lock_plan([] of EncodedEvent, items)) do |connection|
+          rows = connection.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any})
         end
+
+        rows.map { |id, header, body| decode_or_erase(header, body, id) }
       end
 
       # Builds the WHERE condition for an encoded query, appending its parameters

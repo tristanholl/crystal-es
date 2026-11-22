@@ -63,6 +63,13 @@ describe "ES::EventDSL tag compile-time checks" do
     end
   end
 
+  it "refuses to append an array of something other than events" do
+    ok, output = compile_events(%(ES::EventStoreAdapters::InMemory.new.append(["not an event"])))
+
+    ok.should be_false
+    output.should contain("append expects an array of events, got Array(String)")
+  end
+
   it "warns when a key is hashed in one event but not in another" do
     ok, output = compile_events(
       event_with("tag :email, hashed: true", "HashedEmailEvent", "hashed_email") + "\n" +

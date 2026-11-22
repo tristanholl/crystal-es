@@ -48,6 +48,52 @@ module ES
       raise ES::Exception::NotImplemented.new("#{self.class.name} does not support queries")
     end
 
+    # Appends several events atomically — all or none — and, given a condition,
+    # only if no event matching its query was appended after its position.
+    # Raises `ES::Exception::Conflict` when one was, and appends nothing.
+    #
+    # This is the write side of a dynamic consistency boundary: read the events
+    # a decision depends on, decide, then append on the condition that nothing
+    # the decision depended on changed in between. Returns the position of the
+    # last appended event.
+    #
+    # Takes an array of any event type — `[StudentSubscribed.new(...)]` is an
+    # `Array(StudentSubscribed)`, which Crystal would not pass where an
+    # `Array(ES::Event)` is expected.
+    def append(events : Array(T), condition : ES::AppendCondition? = nil) : Int64 forall T
+      {% raise "append expects an array of events, got Array(#{T})" unless T <= ES::Event %}
+      append_batch(events.map(&.as(ES::Event)), condition)
+    end
+
+    # What adapters implement for `append(events, condition)`. Not abstract, so
+    # adapters written before conditional appends existed still compile; they
+    # raise when asked.
+    protected def append_batch(events : Array(ES::Event), condition : ES::AppendCondition?) : Int64
+      raise ES::Exception::NotImplemented.new("#{self.class.name} does not support batch or conditional appends")
+    end
+
+    # An event ready to be stored, with what locking and matching need to know
+    protected record EncodedEvent, event : ES::Event, header : String, body : String, handle : String, tags : Array(String)
+
+    # Encodes a batch before anything is written, so a hashing or encryption
+    # failure on any one event leaves the store untouched
+    protected def encode_events(events : Array(ES::Event)) : Array(EncodedEvent)
+      raise ES::Exception::InvalidState.new("Nothing to append: the batch is empty") if events.empty?
+
+      events.map do |event|
+        EncodedEvent.new(event, encode_header(event), encode_body(event), event.header.event_handle, event.tags.map { |tag| encode_tag(tag) })
+      end
+    end
+
+    # The error raised when an append condition fails. Names no tag values,
+    # which may be personal data.
+    protected def append_conflict(condition : ES::AppendCondition) : ES::Exception::Conflict
+      ES::Exception::Conflict.new(
+        "Append condition failed: an event matching the query was appended after position #{condition.after || "none"}",
+        status_code: HTTP::Status::CONFLICT
+      )
+    end
+
     # Refuses read options that have no sensible meaning
     protected def validate_read_options(after : Int64?, limit : Int32?)
       raise ES::Exception::InvalidState.new("after must not be negative, got #{after}") if after && after < 0

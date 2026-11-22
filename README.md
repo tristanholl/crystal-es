@@ -344,6 +344,36 @@ events.last.position # => position of the last matching event
 
 In Postgres, `setup` creates a GIN index on `header->'tags'` (`jsonb_path_ops`) and a btree index on the event handle, on new and existing stores alike. On a large existing store, building them blocks appends while it runs. Create them beforehand with `CREATE INDEX CONCURRENTLY`, using the definitions in `ES::EventStoreAdapters::Postgres::TAGS_INDEX` and `EVENT_HANDLE_INDEX`. A concurrent build that fails leaves an invalid index behind, which `setup` then skips because the name exists. `setup` logs a warning for every invalid index in the `eventstore` schema. Drop it and build it again.
 
+#### Conditional appends
+
+`append(events, condition)` appends a batch atomically, all or nothing. With a condition, it appends only if no event matching the condition's query was appended after the given position. Otherwise it raises `ES::Exception::Conflict` (HTTP 409) and appends nothing. Together with `read`, this gives a consistency boundary drawn around tags instead of one aggregate: read, decide, append on the condition that nothing the decision depended on changed in between.
+
+```crystal
+query  = ES::Query.new(ES::QueryItem.new(CourseDefined, StudentSubscribed, tags: {course_id: course_id}))
+events = event_store.read(query)
+
+# ... decide on events, e.g. check the course isn't full ...
+
+event_store.append(
+  [StudentSubscribed.new(actor_id: actor, command_handler: "Subscribe", course_id: course_id, student_id: student_id)],
+  ES::AppendCondition.new(query, after: events.last?.try(&.position))
+)
+```
+
+- Pass the position of the **last event `read` returned for the same query**, or `nil` if it returned none. `nil` fails if any matching event exists, which is how a uniqueness rule is written (`tags: {student_email: email}`, `after: nil`). Don't take the position from elsewhere, such as the head of the store or a read of a different query. Positions are not commit-ordered, so the check could miss a matching event that committed late.
+- `append(event)` still works and now returns the event's position. `append(events)` takes an array of any event type, e.g. `[StudentSubscribed.new(...)]`, without casting.
+- In Postgres, appends and reads use transaction-scoped advisory locks:
+  - Every append takes shared locks on the tags and type of the events it writes. Plain appends never wait for each other.
+  - A conditional append takes an exclusive lock on what its query selects, then runs the check and the inserts in the same READ COMMITTED transaction. The check waits for any in-flight append it could match.
+  - `read` takes the same exclusive locks while its `SELECT` runs. Without them, a matching event could commit after a higher-positioned one the read returned, below the position the check looks after, and never be seen. Reads and appends of the same boundary therefore wait for each other briefly. Unrelated boundaries never wait for each other.
+  - A batch carrying more than `MAX_LOCK_KEYS` (64) distinct tags and types locks the whole store exclusively instead, so a large import can't exhaust Postgres' shared lock table.
+  - The locks use the two-key form of `pg_advisory_xact_lock` under their own namespace (`LOCK_NAMESPACE`), so they don't collide with advisory locks your application takes with the one-key form.
+- An item without tags locks by type, and `ES::Query.all` locks the whole store. A read or condition like that blocks every append it could match for as long as it runs, so use the narrowest tags the rule allows. Use `each_event` for full scans.
+- The guarantee holds only if every writer follows the lock protocol:
+  - Don't insert into `eventstore.events` by other means.
+  - Don't let an older crystal-es version write to the store while tag reads or conditional appends are in use. During a rolling upgrade, wait until every writer runs 0.11 or later.
+  - Leave the events id sequence at its default `CACHE 1`. A cached sequence hands out positions out of order across connections.
+
 The GIN index finds every event carrying a tag, but it can't narrow by position. A query or an `after:` check therefore costs in proportion to the number of events carrying its tags. That is cheap for the narrow tags consistency boundaries are made of (one course, one student), and slow for a tag shared by a large part of the store, such as a tenant id.
 
 ---
