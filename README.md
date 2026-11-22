@@ -321,6 +321,31 @@ bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 - **`ES::Adapters::EventStores::Postgres`** — stores events as JSONB rows with unique `(aggregate_id, version)` constraints. Provides a flattened view for stream queries and cursor-based pagination for batch replay.
 - **`ES::Adapters::EventStores::InMemory`** — lightweight implementation for tests.
 
+#### Querying by tag
+
+`read(query, after: nil, limit: nil)` returns the events a decision depends on, selected by type and [tag](#tags) rather than by aggregate:
+
+```crystal
+query = ES::Query.new(
+  ES::QueryItem.new(CourseDefined, CourseCapacityChanged, tags: {course_id: course_id}),
+  ES::QueryItem.new(StudentSubscribed, tags: {course_id: course_id}),
+)
+
+events = event_store.read(query)
+events.last.position # => position of the last matching event
+```
+
+- An event matches an item when it is of one of the item's types and carries **all** of its tags. An event matches the query when it matches **any** item.
+- An item without types matches every type (`ES::QueryItem.new(tags: {...})`). An item without tags matches regardless of tags. `ES::Query.all` matches every event.
+- Tag values are given in plaintext. A value is hashed before matching when its key is declared `hashed: true` on an event, so a query never repeats that decision. A query for a hashed tag needs the tag hasher, like an append.
+- Events come back in append order, each with its `position` in the store. Positions only increase but are not gapless. `after:` returns only events past a position, `limit:` caps how many are returned.
+- Positions are not commit-ordered: concurrent appends can commit in the opposite order of their positions. Don't use `after:` as a cursor to follow the store, because re-reading after the last position you saw can miss an event that committed late with a lower position. A position marks the last event a decision saw.
+- An event whose encryption key was destroyed still comes back, with its header (type, tags, position) and a `nil` body, flagged `body_erased?`. Erasure removes the data, not the fact that something happened. A course still counts the subscription of an erased student, and can show it as "deleted user". Materializing such an event into its class raises `ES::Exception::InvalidState`, so check `body_erased?` first.
+
+In Postgres, `setup` creates a GIN index on `header->'tags'` (`jsonb_path_ops`) and a btree index on the event handle, on new and existing stores alike. On a large existing store, building them blocks appends while it runs. Create them beforehand with `CREATE INDEX CONCURRENTLY`, using the definitions in `ES::EventStoreAdapters::Postgres::TAGS_INDEX` and `EVENT_HANDLE_INDEX`. A concurrent build that fails leaves an invalid index behind, which `setup` then skips because the name exists. `setup` logs a warning for every invalid index in the `eventstore` schema. Drop it and build it again.
+
+The GIN index finds every event carrying a tag, but it can't narrow by position. A query or an `after:` check therefore costs in proportion to the number of events carrying its tags. That is cheap for the narrow tags consistency boundaries are made of (one course, one student), and slow for a tag shared by a large part of the store, such as a tenant id.
+
 ---
 
 ### Queue

@@ -26,6 +26,10 @@ module ES
     # Aggregates and projections both need this, so it lives here — the one place
     # that already knows how to get from a handle to a class.
     def materialize(stored : ES::EventStore::Event, header : ES::Event::Header) : ES::Event
+      # Without this, the body class would fail on JSON null with a parse error
+      # that says nothing about why the body is missing.
+      raise ES::Exception::InvalidState.new("Event '#{header.event_id}' cannot be materialized: its body was erased with its encryption key") if stored.body_erased?
+
       event_class(header.event_handle).new(header, stored.body)
     end
 

@@ -3,6 +3,10 @@ module ES
     class InMemory < ES::EventStore
       @events : Hash(UUID, ES::EventStore::Event) = Hash(UUID, ES::EventStore::Event).new
 
+      # Global position of each event, in append order, starting at 1
+      @positions : Hash(UUID, Int64) = Hash(UUID, Int64).new
+      @position : Int64 = 0_i64
+
       # Initialize with an optional queue adapter, payload encryption and tag hashing
       def initialize(
         @queue : ES::QueueAdapters::InMemory? = nil,
@@ -19,7 +23,9 @@ module ES
       # Appends an event to the event stream
       def append(event : ES::Event)
         stored = ES::EventStore::Event.new(JSON.parse(encode_header(event)), JSON.parse(encode_body(event)))
+        @position += 1
         @events[event.header.event_id] = stored
+        @positions[event.header.event_id] = @position
 
         q = @queue
         q.append(stored.header) unless q.nil?
@@ -67,6 +73,35 @@ module ES
         end
 
         key_ids
+      end
+
+      # Returns the events matching a query, in append order
+      def read(query : ES::Query, after : Int64? = nil, limit : Int32? = nil) : Array(ES::EventStore::Event)
+        validate_read_options(after, limit)
+        items = encode_query(query)
+        result = Array(ES::EventStore::Event).new
+
+        @events.each do |event_id, event|
+          break if limit && result.size >= limit
+
+          position = @positions[event_id]
+          next if after && position <= after
+          next unless matches?(event.header, items)
+
+          result << decode_or_erase(event.header, event.body, position)
+        end
+
+        result
+      end
+
+      # Whether a stored header matches any item of an encoded query
+      private def matches?(header : JSON::Any, items : Array(EncodedQueryItem)) : Bool
+        handle = header["event_handle"].as_s
+        tags = header["tags"]?.try(&.as_a.map(&.as_s)) || [] of String
+
+        items.any? do |item|
+          (item.types.empty? || item.types.includes?(handle)) && item.tags.all? { |tag| tags.includes?(tag) }
+        end
       end
 
       # Returns the stream of events for a given aggregate

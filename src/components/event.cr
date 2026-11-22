@@ -107,8 +107,12 @@ module ES
     # miss events. Keeping the two consistent is the application's job; this
     # only warns at compile time when they diverge, comparing every event class
     # `define_event` generated, whether it is registered or not.
+    #
+    # The same pass generates `tag_key_hashed?`, which is how a query decides
+    # whether to hash a value. A key declared hashed by any event is hashed.
     macro finished
       {% seen = {} of StringLiteral => ASTNode %}
+      {% hashed_keys = [] of StringLiteral %}
       {% for klass in ES::Event.all_subclasses.sort_by(&.name) %}
         {% if klass.has_constant?("TAG_DEFINITIONS") %}
           {% for definition in klass.constant("TAG_DEFINITIONS") %}
@@ -117,9 +121,19 @@ module ES
               {% warning "Tag '#{definition[0].id}' is declared hashed: #{previous[1]} in #{previous[2]} but hashed: #{definition[1]} in #{klass}. Queries hash a tag by its declaration, so one of the two will not be found." %}
             {% end %}
             {% seen[definition[0]] = {definition[0], definition[1], klass} unless previous %}
+            {% hashed_keys << definition[0] if definition[1] && !hashed_keys.includes?(definition[0]) %}
           {% end %}
         {% end %}
       {% end %}
+
+      # Whether any event declares the tag key `hashed: true`
+      def self.tag_key_hashed?(key : String) : Bool
+        {% if hashed_keys.empty? %}
+          false
+        {% else %}
+          {{ hashed_keys }}.includes?(key)
+        {% end %}
+      end
     end
 
     def initialize
