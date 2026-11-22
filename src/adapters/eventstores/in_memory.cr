@@ -7,8 +7,11 @@ module ES
       @positions : Hash(UUID, Int64) = Hash(UUID, Int64).new
       @position : Int64 = 0_i64
 
-      # Makes a conditional append's check and insert one step, and keeps reads
-      # from iterating while an append changes the store
+      # Current version of every stored tag
+      @tag_versions : Hash(String, Int64) = Hash(String, Int64).new
+
+      # Makes an append's check, version assignment and insert one step, and
+      # keeps reads from iterating while an append changes the store
       @mutex = Mutex.new
 
       # Initialize with an optional queue adapter, payload encryption and tag hashing
@@ -29,11 +32,11 @@ module ES
         append_batch([event.as(ES::Event)], nil)
       end
 
-      # Appends a batch atomically, failing with `ES::Exception::Conflict` if the
-      # condition's query matches an event appended after its position
+      # Appends a batch atomically, failing with `ES::Exception::Conflict` if a
+      # tag the condition names is no longer at the expected version
       protected def append_batch(events : Array(ES::Event), condition : ES::AppendCondition?) : Int64
         encoded = encode_events(events)
-        items = condition.try { |cond| encode_query(cond.fail_if_events_match) }
+        expected = condition.try { |cond| expected_versions(cond) } || {} of String => Int64
 
         @mutex.synchronize do
           # The Postgres store refuses a repeated event id through its unique
@@ -43,17 +46,21 @@ module ES
             raise ES::Exception::Conflict.new("An event id in the batch is already stored or repeated", status_code: HTTP::Status::CONFLICT)
           end
 
-          if condition && items
-            after = condition.after
-            conflict = @events.any? do |event_id, event|
-              (after.nil? || @positions[event_id] > after) && matches?(event.header, items)
-            end
-            raise append_conflict(condition) if conflict
+          if mismatch = version_mismatch(expected, @tag_versions)
+            raise append_conflict(mismatch)
           end
 
-          encoded.each do |event|
+          # Assigned on a copy, so a failure below leaves the versions untouched
+          current = @tag_versions.dup
+          versions = assign_versions(encoded, current)
+          stored_events = encoded.map_with_index do |event, index|
+            ES::EventStore::Event.new(JSON.parse(stored_header(event, versions[index])), JSON.parse(event.body))
+          end
+          @tag_versions = current
+
+          encoded.each_with_index do |event, index|
             event_id = event.event.header.event_id
-            stored = ES::EventStore::Event.new(JSON.parse(event.header), JSON.parse(event.body))
+            stored = stored_events[index]
             @position += 1
             @events[event_id] = stored
             @positions[event_id] = @position
@@ -126,6 +133,23 @@ module ES
         end
 
         result
+      end
+
+      # Returns the events matching a query and the current versions of its tags,
+      # both as of one moment
+      def read_for_decision(query : ES::Query) : ES::Decision
+        items = encode_query(query)
+        tags = decision_tags(items)
+
+        events, versions = @mutex.synchronize do
+          {
+            @events.compact_map { |event_id, event| {event_id, event} if matches?(event.header, items) }
+              .map { |event_id, event| {event, @positions[event_id]} },
+            tags.to_h { |tag| {tag, @tag_versions.fetch(tag, 0_i64)} },
+          }
+        end
+
+        ES::Decision.new(events.map { |event, position| decode_or_erase(event.header, event.body, position) }, versions)
       end
 
       # The stored events with their positions as of now, so iterating them never

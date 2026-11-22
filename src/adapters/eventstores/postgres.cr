@@ -16,11 +16,11 @@ module ES
       # Serves the type filter of `read`, including items that name types but no tags
       EVENT_HANDLE_INDEX = %(CREATE INDEX IF NOT EXISTS events_event_handle_idx ON "eventstore"."events"((header->>'event_handle'));)
 
-      # Namespace of the advisory locks taken by `append`, the first argument of
-      # the two-key `pg_advisory_xact_lock(int, int)`. Keeps them apart from any
-      # advisory locks the application takes with the one-key form or its own
-      # namespace.
-      LOCK_NAMESPACE = IO::ByteFormat::BigEndian.decode(Int32, Digest::SHA256.digest("crystal-es:append")[0, 4])
+      # The current version of every stored tag: how many events carrying it were
+      # appended. Every tagged append raises it under the row lock, which is what
+      # serializes appends carrying the same tag and what conditional appends
+      # compare against. One row per distinct tag value; rows are never deleted.
+      TAG_VERSIONS_TABLE = %(CREATE TABLE IF NOT EXISTS "eventstore"."tag_versions" ("tag" TEXT PRIMARY KEY, "version" BIGINT NOT NULL);)
 
       # Initialize with a database connection and, optionally, payload encryption
       # and tag hashing
@@ -42,6 +42,10 @@ module ES
           @db.exec EVENT_ID_INDEX
           @db.exec TAGS_INDEX
           @db.exec EVENT_HANDLE_INDEX
+          @db.exec TAG_VERSIONS_TABLE
+          # Default privileges only cover tables created by the role that set
+          # them, which need not be the one running this setup
+          @db.exec %(GRANT SELECT ON "eventstore"."tag_versions" TO pg_monitor;)
           warn_about_invalid_indexes
           return true
         end
@@ -65,6 +69,7 @@ module ES
         migrations << EVENT_ID_INDEX
         migrations << TAGS_INDEX
         migrations << EVENT_HANDLE_INDEX
+        migrations << TAG_VERSIONS_TABLE
 
         migrations << %(
           CREATE OR REPLACE VIEW "eventstore"."eventstore_flattened"
@@ -102,146 +107,68 @@ module ES
         end
       end
 
-      # Lock keys one append may take one by one. A batch carrying more distinct
-      # tags and types takes the store-wide key exclusively instead: advisory
-      # locks live in Postgres' shared lock table, sized by
-      # `max_locks_per_transaction` (64 by default) times the connections, and a
-      # large import holding one per tag could exhaust it for the whole cluster.
-      MAX_LOCK_KEYS = 64
-
       # Appends an event to the event stream and returns its position
       def append(event : ES::Event)
         append_batch([event.as(ES::Event)], nil)
       end
 
-      # Appends a batch atomically, failing with `ES::Exception::Conflict` if the
-      # condition's query matches an event appended after its position.
+      # Appends a batch atomically, failing with `ES::Exception::Conflict` if a
+      # tag the condition names is no longer at the expected version.
       #
-      # Positions come from a sequence, which hands them out in the order inserts
-      # start, not the order they commit, so checking and inserting in one
-      # statement would race. Instead, in one READ COMMITTED transaction:
+      # In one READ COMMITTED transaction:
       #
-      # 1. Advisory locks (see `lock_plan`). A conditional append locks what its
-      #    query selects exclusively; every append locks what its events carry
-      #    shared. Plain appends never wait for each other, while a check waits
-      #    for any in-flight append of an event it could match, and blocks new
-      #    ones.
-      # 2. The check, as its own statement. Under READ COMMITTED each statement
-      #    takes a fresh snapshot, so it sees whatever committed while step 1
-      #    waited. Folded into the locking statement — or under REPEATABLE READ,
-      #    which is why the level is set explicitly — it would not.
-      # 3. The inserts.
+      # 1. Lock the version row of every tag the batch carries or the condition
+      #    names — created at version 0 where missing — in one statement, in tag
+      #    order, so two appends can never wait on each other in a cycle. An
+      #    append carrying a tag that another append is still writing waits for
+      #    it to commit and then sees its version.
+      # 2. Compare the condition's expected versions with the locked ones.
+      # 3. Assign each event its tag versions, stamp them into its header, insert
+      #    it, and store the raised versions.
       #
-      # The check alone is not enough: a matching event can commit after a
-      # higher-positioned one the decision read, and below the position it checks
-      # after. `read` takes the same locks for that reason.
-      #
-      # Locks are keyed by stored tags — digests for hashed ones — so no
-      # plaintext value of a hashed tag is sent with them.
+      # Versions of one tag therefore follow commit order without gaps, whatever
+      # positions the events get. Untagged events with no condition lock nothing.
       protected def append_batch(events : Array(ES::Event), condition : ES::AppendCondition?) : Int64
         encoded = encode_events(events)
-        items = condition.try { |cond| encode_query(cond.fail_if_events_match) }
+        expected = condition.try { |cond| expected_versions(cond) } || {} of String => Int64
+        tags = (encoded.flat_map(&.tags) + expected.keys).uniq.sort!
         position = 0_i64
 
-        locked_transaction(lock_plan(encoded, items)) do |connection|
-          if condition && items
-            args = [] of DB::Any | Array(String)
-            sql = "SELECT EXISTS (SELECT 1 FROM \"eventstore\".\"events\" WHERE #{query_condition(items, args)}"
-            if after = condition.after
-              args << after
-              sql += %( AND id > $#{args.size})
-            end
-            sql += ")"
+        @db.transaction do |tx|
+          connection = tx.connection
+          connection.exec %(SET TRANSACTION ISOLATION LEVEL READ COMMITTED)
 
-            raise append_conflict(condition) if connection.query_one(sql, args: args, as: Bool)
+          current = {} of String => Int64
+          unless tags.empty?
+            # The no-op update is what takes the row lock on an existing row
+            connection.query_all(
+              %(INSERT INTO "eventstore"."tag_versions" AS t (tag, version) SELECT tag, 0 FROM unnest($1::text[]) AS tag ORDER BY tag ON CONFLICT (tag) DO UPDATE SET version = t.version RETURNING tag, version),
+              tags, as: {String, Int64}
+            ).each { |tag, version| current[tag] = version }
           end
 
-          encoded.each do |event|
+          if mismatch = version_mismatch(expected, current)
+            raise append_conflict(mismatch)
+          end
+
+          versions = assign_versions(encoded, current)
+          encoded.each_with_index do |event, index|
             position = connection.query_one(
               %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2) RETURNING id::BIGINT),
-              event.header, event.body, as: Int64
+              stored_header(event, versions[index]), event.body, as: Int64
+            )
+          end
+
+          raised = encoded.flat_map(&.tags).uniq!
+          unless raised.empty?
+            connection.exec(
+              %(UPDATE "eventstore"."tag_versions" AS t SET version = v.version FROM unnest($1::text[], $2::int8[]) AS v(tag, version) WHERE t.tag = v.tag),
+              raised, raised.map { |tag| current[tag] }
             )
           end
         end
 
         position
-      end
-
-      # Runs the block in a READ COMMITTED transaction holding the given locks.
-      #
-      # All locks are taken by one statement, in the order given — `unnest` over
-      # a function scan yields the arrays in order, and no sort runs in between.
-      private def locked_transaction(plan : Array({Int32, Bool}), &)
-        keys = plan.map(&.[0])
-        exclusive = plan.map(&.[1])
-
-        @db.transaction do |tx|
-          connection = tx.connection
-          connection.exec %(SET TRANSACTION ISOLATION LEVEL READ COMMITTED)
-          connection.exec(
-            %(SELECT CASE WHEN t.exclusive THEN pg_advisory_xact_lock($1, t.key) ELSE pg_advisory_xact_lock_shared($1, t.key) END FROM unnest($2::int4[], $3::bool[]) AS t(key, exclusive)),
-            LOCK_NAMESPACE, keys, exclusive
-          )
-          yield connection
-        end
-      end
-
-      # The advisory locks to take, as `{key, exclusive}` sorted by key so two
-      # transactions can never wait on each other's locks in a cycle.
-      #
-      # Every append takes a shared lock on each tag and the type of every event
-      # it writes, plus one store-wide key. A condition — or a read — then only
-      # needs one exclusive lock per query item, on something every matching
-      # event's writer holds shared: one of the item's tags if it has any — an
-      # event matching the item carries all of them — else each of its types,
-      # else the store-wide key. It also takes the store-wide key shared, which
-      # is what a batch past `MAX_LOCK_KEYS` locks exclusively instead of its
-      # tags and types. Where a key is needed both ways, exclusive wins.
-      #
-      # Keys are 32-bit digests; two names sharing one only serialize appends
-      # that did not need to be, they never let a conflict through.
-      private def lock_plan(encoded : Array(EncodedEvent), items : Array(EncodedQueryItem)?) : Array({Int32, Bool})
-        modes = Hash(Int32, Bool).new
-
-        names = Set(String).new
-        encoded.each do |event|
-          names << "handle:#{event.handle}"
-          event.tags.each { |tag| names << "tag:#{tag}" }
-        end
-
-        if names.size > MAX_LOCK_KEYS
-          lock(modes, "*", exclusive: true)
-        else
-          lock(modes, "*", exclusive: false)
-          names.each { |name| lock(modes, name, exclusive: false) }
-        end
-
-        items.try &.each do |item|
-          lock(modes, "*", exclusive: false)
-
-          if tag = item.tags.min?
-            lock(modes, "tag:#{tag}", exclusive: true)
-          elsif !item.types.empty?
-            item.types.each { |type| lock(modes, "handle:#{type}", exclusive: true) }
-          else
-            lock(modes, "*", exclusive: true)
-          end
-        end
-
-        modes.to_a.sort_by!(&.[0])
-      end
-
-      private def lock(modes : Hash(Int32, Bool), name : String, exclusive : Bool)
-        key = self.class.lock_key(name)
-        modes[key] = exclusive || modes.fetch(key, false)
-      end
-
-      # The advisory lock key for a lock name — `"*"`, `"handle:<event handle>"`
-      # or `"tag:<stored tag>"` — taken under `LOCK_NAMESPACE`. Public because
-      # the locks are a protocol: anything else writing to the events table has
-      # to take them the same way for conditional appends to stay correct.
-      def self.lock_key(name : String) : Int32
-        IO::ByteFormat::BigEndian.decode(Int32, Digest::SHA256.digest(name)[0, 4])
       end
 
       # Returns a single event for a given id
@@ -323,20 +250,34 @@ module ES
           sql += %( LIMIT $#{args.size})
         end
 
-        # Read under the locks a conditional append on this query takes. Until
-        # the locks are granted, a matching append may be in flight with a
-        # position below one that already committed; once they are, none can be,
-        # and every later one gets a higher position than anything this returns.
-        # So `after: <last position read>` cannot skip an event the read missed.
-        # The SELECT has to run while the locks are held — released any earlier,
-        # a new append could take a lower position than one committing before the
-        # SELECT starts.
+        @db.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any}).map do |id, header, body|
+          decode_or_erase(header, body, id)
+        end
+      end
+
+      # Returns the events matching a query and the current versions of its
+      # tags, read in one REPEATABLE READ snapshot. A writer commits its events
+      # and its version raises together, so the two always agree: no event the
+      # read missed can be hidden behind a version it saw. Takes no locks.
+      def read_for_decision(query : ES::Query) : ES::Decision
+        items = encode_query(query)
+        tags = decision_tags(items)
+        args = [] of DB::Any | Array(String)
+        sql = %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE #{query_condition(items, args)} ORDER BY id ASC)
+
         rows = [] of {Int64, JSON::Any, JSON::Any}
-        locked_transaction(lock_plan([] of EncodedEvent, items)) do |connection|
+        versions = tags.to_h { |tag| {tag, 0_i64} }
+        @db.transaction do |tx|
+          connection = tx.connection
+          connection.exec %(SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY)
           rows = connection.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any})
+          connection.query_all(
+            %(SELECT tag, version FROM "eventstore"."tag_versions" WHERE tag = ANY($1::text[])),
+            tags, as: {String, Int64}
+          ).each { |tag, version| versions[tag] = version }
         end
 
-        rows.map { |id, header, body| decode_or_erase(header, body, id) }
+        ES::Decision.new(rows.map { |id, header, body| decode_or_erase(header, body, id) }, versions)
       end
 
       # Builds the WHERE condition for an encoded query, appending its parameters

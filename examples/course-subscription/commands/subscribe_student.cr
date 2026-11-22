@@ -9,7 +9,8 @@ end
 # the number of courses one student may take. With aggregates, one of the two
 # would have to own the other, or the check would race. With a dynamic
 # consistency boundary, the decision reads exactly the events it depends on —
-# across both — and appends on the condition that none of them changed.
+# across both — together with the versions of both tags, and appends on the
+# condition that neither tag moved.
 class SubscribeStudentHandler < ES::CommandHandler(SubscribeStudent)
   MAX_COURSES_PER_STUDENT = 2
 
@@ -21,13 +22,13 @@ class SubscribeStudentHandler < ES::CommandHandler(SubscribeStudent)
       ES::QueryItem.new(Events::CourseDefined, Events::StudentSubscribed, tags: {course_id: course_id}),
       ES::QueryItem.new(Events::StudentSubscribed, tags: {student_id: student_id}),
     )
-    events = @event_store.read(query)
+    decision = @event_store.read_for_decision(query)
 
     capacity = nil
     course_subscriptions = 0
     student_subscriptions = 0
 
-    events.each do |stored|
+    decision.events.each do |stored|
       case event = @event_handlers.materialize(stored)
       when Events::CourseDefined
         capacity = event.body.as(Events::CourseDefined::Body).capacity
@@ -48,7 +49,7 @@ class SubscribeStudentHandler < ES::CommandHandler(SubscribeStudent)
         actor_id: nil, command_handler: "SubscribeStudent", course_id: course_id, student_id: student_id,
         tags: {course_id: course_id, student_id: student_id}
       )],
-      ES::AppendCondition.new(query, after: events.last?.try(&.position))
+      decision.condition
     )
   end
 end

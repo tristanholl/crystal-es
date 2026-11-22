@@ -1,11 +1,12 @@
 require "../../spec_helper"
 require "pg"
 
-# `EventStore#append(events, condition)` appends a batch atomically, on the
-# condition that nothing matching a query was appended after a position. The
-# same scenarios run against every adapter; the Postgres ones, including the
-# concurrency races, need a live database and only run when ES_TEST_DATABASE_URL
-# is set, e.g.
+# Tag versions: every tagged append raises the version of each of its tags and
+# stamps it into the stored header; `append(events, condition)` appends a batch
+# atomically, on the condition that the tags it names are still at the
+# versions it expects. The same scenarios run against every adapter; the
+# Postgres ones, including the concurrency races, need a live database and only
+# run when ES_TEST_DATABASE_URL is set, e.g.
 #   ES_TEST_DATABASE_URL=postgres://postgres@localhost:5432/es_test crystal spec
 
 class AppendCourseDefined < ES::Event
@@ -58,8 +59,12 @@ private def append_hasher : ES::TagHasher
   ES::TagHasher.new(ES::ApplicationEncryptionKeyManager.new(Bytes.new(32, 9_u8)))
 end
 
-# Append scenarios shared by every adapter. `build` returns an empty store wired
-# to the given tag hasher.
+private def versions_of(event : ES::EventStore::Event) : Hash(String, Int64)
+  ES::Event::Header.from_json(event.header.to_json).tag_versions
+end
+
+# Scenarios shared by every adapter. `build` returns an empty store wired to the
+# given tag hasher.
 private def append_scenarios(&build : ES::TagHasher? -> ES::EventStore)
   it "appends a batch in order and returns the last position" do
     store = build.call(append_hasher)
@@ -73,79 +78,150 @@ private def append_scenarios(&build : ES::TagHasher? -> ES::EventStore)
     found.last.position.should eq(position)
   end
 
-  it "appends when nothing matches the condition" do
+  it "stamps each event with gap-free versions of its tags" do
     store = build.call(append_hasher)
-    course = UUID.v7
-    store.append(defined(UUID.v7))
+    course, student = UUID.v7, UUID.v7
+    store.append(defined(course))
+    store.append([joined(course, student), joined(course)])
 
-    store.append([defined(course)], ES::AppendCondition.new(course_query(course)))
+    found = store.read(course_query(course))
 
-    store.read(course_query(course)).size.should eq(1)
+    found.map { |event| versions_of(event)["course_id:#{course}"] }.should eq([1, 2, 3])
+    versions_of(found[1])["student_id:#{student}"].should eq(1)
   end
 
-  it "fails without an after position when any matching event exists, appending nothing" do
+  it "leaves untagged events without versions" do
+    store = build.call(append_hasher)
+    event = DummyEvent.new
+    store.append(event)
+
+    store.fetch_event(event.header.event_id).header["tag_versions"]?.should be_nil
+  end
+
+  it "reads a decision with the versions of its tags and appends when nothing changed" do
+    store = build.call(append_hasher)
+    course = UUID.v7
+    store.append([defined(course), joined(course)])
+
+    decision = store.read_for_decision(course_query(course))
+
+    decision.events.size.should eq(2)
+    decision.versions.should eq({"course_id:#{course}" => 2})
+    store.append([joined(course)], decision.condition)
+    store.read(course_query(course)).size.should eq(3)
+  end
+
+  it "fails once anything carrying one of the decision's tags was appended, appending nothing" do
     store = build.call(append_hasher)
     course = UUID.v7
     store.append(defined(course))
-
-    expect_raises(ES::Exception::Conflict, /after position none/) do
-      store.append([joined(course), joined(course)], ES::AppendCondition.new(course_query(course)))
-    end
-
-    store.read(ES::Query.all).size.should eq(1)
-  end
-
-  it "appends after the position a decision saw, and fails once a matching event follows it" do
-    store = build.call(append_hasher)
-    course = UUID.v7
-    store.append(defined(course))
-    seen = store.read(course_query(course)).last.position
-    condition = ES::AppendCondition.new(course_query(course), after: seen)
+    decision = store.read_for_decision(course_query(course))
 
     # Another decision on the same course gets in first
-    store.append([joined(course)], condition)
+    store.append([joined(course)], decision.condition)
 
-    expect_raises(ES::Exception::Conflict) { store.append([joined(course)], condition) }
+    expect_raises(ES::Exception::Conflict, /tag 'course_id' is no longer at the expected version/) do
+      store.append([joined(course), joined(course)], decision.condition)
+    end
     store.read(course_query(course)).size.should eq(2)
   end
 
-  it "ignores events appended after the position that do not match" do
+  it "counts every event carrying a tag, whatever its type" do
     store = build.call(append_hasher)
     course = UUID.v7
     store.append(defined(course))
-    condition = ES::AppendCondition.new(course_query(course), after: store.read(course_query(course)).last.position)
+    decision = store.read_for_decision(ES::Query.new(ES::QueryItem.new(AppendStudentSubscribed, tags: {course_id: course})))
+
+    # Not a subscription, but it carries the course tag
+    store.append(defined(course))
+
+    expect_raises(ES::Exception::Conflict) { store.append([joined(course)], decision.condition) }
+  end
+
+  it "ignores events carrying other tags" do
+    store = build.call(append_hasher)
+    course = UUID.v7
+    store.append(defined(course))
+    decision = store.read_for_decision(course_query(course))
 
     store.append(defined(UUID.v7))
     store.append(joined(UUID.v7))
     store.append(DummyEvent.new)
 
-    store.append([joined(course)], condition)
+    store.append([joined(course)], decision.condition)
     store.read(course_query(course)).size.should eq(2)
   end
 
-  it "checks items without tags by type, and an empty item against every event" do
+  it "guards a decision across several tags" do
     store = build.call(append_hasher)
-    store.append(defined(UUID.v7))
+    course, student = UUID.v7, UUID.v7
+    store.append(defined(course))
+    query = ES::Query.new(
+      ES::QueryItem.new(tags: {course_id: course}),
+      ES::QueryItem.new(tags: {student_id: student}),
+    )
+    decision = store.read_for_decision(query)
+    decision.versions.should eq({"course_id:#{course}" => 1, "student_id:#{student}" => 0})
 
-    expect_raises(ES::Exception::Conflict) do
-      store.append([DummyEvent.new], ES::AppendCondition.new(ES::Query.new(ES::QueryItem.new(AppendCourseDefined))))
-    end
-    store.append([DummyEvent.new], ES::AppendCondition.new(ES::Query.new(ES::QueryItem.new(AppendStudentSubscribed))))
+    # The student subscribes elsewhere in the meantime
+    store.append(joined(UUID.v7, student))
 
-    expect_raises(ES::Exception::Conflict) do
-      store.append([DummyEvent.new], ES::AppendCondition.new(ES::Query.all))
-    end
+    expect_raises(ES::Exception::Conflict, /student_id/) { store.append([joined(course, student)], decision.condition) }
   end
 
-  it "checks a hashed tag without naming its value in the conflict" do
+  it "keeps a value unique with version 0, without naming it in the conflict" do
     store = build.call(append_hasher)
-    store.append(registered("jane@example.com"))
-    unique_email = ES::AppendCondition.new(ES::Query.new(ES::QueryItem.new(AppendAccountRegistered, tags: {student_email: "jane@example.com"})))
+    unique = ES::AppendCondition.new.expect(:student_email, "jane@example.com", version: 0)
+    store.append([registered("jane@example.com")], unique)
 
-    error = expect_raises(ES::Exception::Conflict) { store.append([registered("jane@example.com")], unique_email) }
+    error = expect_raises(ES::Exception::Conflict) { store.append([registered("jane@example.com")], unique) }
 
     error.message.to_s.should_not contain("jane")
-    store.append([registered("john@example.com")], ES::AppendCondition.new(ES::Query.new(ES::QueryItem.new(AppendAccountRegistered, tags: {student_email: "john@example.com"}))))
+    store.append([registered("john@example.com")], ES::AppendCondition.new.expect(:student_email, "john@example.com", version: 0))
+    store.read(ES::Query.new(ES::QueryItem.new(AppendAccountRegistered))).size.should eq(2)
+  end
+
+  it "guards a decision with the versions a projection saw on the stored events" do
+    store = build.call(append_hasher)
+    course = UUID.v7
+    store.append(defined(course))
+
+    # What a projection keeps from the last event it applied for the course
+    seen = versions_of(store.read(course_query(course)).last)
+    condition = seen.reduce(ES::AppendCondition.new) { |cond, (tag, version)| cond.expect_stored(tag, version) }
+
+    store.append([joined(course)], condition)
+    expect_raises(ES::Exception::Conflict) { store.append([joined(course)], condition) }
+  end
+
+  it "assigns versions itself, ignoring those on an event read back" do
+    source = build.call(append_hasher)
+    course = UUID.v7
+    3.times { source.append(defined(course)) }
+    stored = source.read(course_query(course)).last
+    read_back = AppendCourseDefined.new(ES::Event::Header.from_json(stored.header.to_json), stored.body)
+
+    target = build.call(append_hasher)
+    target.append(read_back)
+
+    versions_of(target.read(course_query(course)).last).should eq({"course_id:#{course}" => 1})
+  end
+
+  it "refuses a decision read with an item that names no tags" do
+    store = build.call(append_hasher)
+
+    expect_raises(ES::Exception::InvalidState, /needs every query item to name tags/) do
+      store.read_for_decision(ES::Query.new(ES::QueryItem.new(tags: {course_id: UUID.v7}), ES::QueryItem.new(AppendCourseDefined)))
+    end
+    expect_raises(ES::Exception::InvalidState, /needs every query item to name tags/) { store.read_for_decision(ES::Query.all) }
+  end
+
+  it "refuses a condition expecting one tag at two versions" do
+    store = build.call(append_hasher)
+    course = UUID.v7
+    condition = ES::AppendCondition.new.expect(:course_id, course, version: 0).expect_stored("course_id:#{course}", 1)
+
+    expect_raises(ES::Exception::InvalidState, /two different versions/) { store.append([defined(course)], condition) }
   end
 
   it "appends nothing when one event of a batch cannot be encoded" do
@@ -163,23 +239,23 @@ private def append_scenarios(&build : ES::TagHasher? -> ES::EventStore)
     course = UUID.v7
 
     store.append([defined(course)])
-    store.append([joined(course), joined(course)], ES::AppendCondition.new(course_query(course), after: store.read(course_query(course)).last.position))
+    store.append([joined(course), joined(course)], store.read_for_decision(course_query(course)).condition)
     store.append([defined(UUID.v7), joined(course)])
 
     store.read(course_query(course)).size.should eq(4)
   end
 
-  it "appends a batch carrying more distinct tags than are locked one by one" do
+  it "appends a batch carrying many distinct tags" do
     store = build.call(append_hasher)
     course = UUID.v7
     store.append(defined(course))
-    seen = store.read(course_query(course)).last.position
-    batch = Array.new(ES::EventStoreAdapters::Postgres::MAX_LOCK_KEYS + 10) { joined(course) }
+    decision = store.read_for_decision(course_query(course))
+    batch = Array.new(200) { joined(course) }
 
-    store.append(batch, ES::AppendCondition.new(course_query(course), after: seen))
+    store.append(batch, decision.condition)
 
     store.read(course_query(course)).size.should eq(batch.size + 1)
-    expect_raises(ES::Exception::Conflict) { store.append([joined(course)], ES::AppendCondition.new(course_query(course), after: seen)) }
+    expect_raises(ES::Exception::Conflict) { store.append([joined(course)], decision.condition) }
   end
 
   it "refuses an empty batch" do
@@ -190,8 +266,28 @@ private def append_scenarios(&build : ES::TagHasher? -> ES::EventStore)
 end
 
 describe ES::AppendCondition do
-  it "refuses a negative after position" do
-    expect_raises(ES::Exception::InvalidState, /after/) { ES::AppendCondition.new(ES::Query.all, after: -1_i64) }
+  it "refuses a negative version and a nil value" do
+    expect_raises(ES::Exception::InvalidState, /must not be negative/) { ES::AppendCondition.new.expect(:course_id, UUID.v7, version: -1) }
+    expect_raises(ES::Exception::InvalidState, /no value/) { ES::AppendCondition.new.expect(:course_id, nil, version: 0) }
+  end
+
+  it "refuses keys no event declares, and malformed or plaintext stored tags" do
+    expect_raises(ES::Exception::InvalidState, /'emial' is not declared/) { ES::AppendCondition.new.expect(:emial, "jane@example.com", version: 0) }
+    expect_raises(ES::Exception::InvalidState, /'emial' is not declared/) { ES::AppendCondition.new.expect_stored("emial:x", 0) }
+    error = expect_raises(ES::Exception::InvalidState, /form '<key>:<value>'/) { ES::AppendCondition.new.expect_stored("jane@example.com", 0) }
+    error.message.to_s.should_not contain("jane")
+    error = expect_raises(ES::Exception::InvalidState, /holds no digest/) { ES::AppendCondition.new.expect_stored("student_email:jane@example.com", 0) }
+    error.message.to_s.should_not contain("jane")
+
+    ES::AppendCondition.new.expect_stored("student_email:#{"ab" * 16}", 1).stored_tags.size.should eq(1)
+  end
+
+  it "resolves whether a tag is hashed from the event declarations" do
+    condition = ES::AppendCondition.new.expect(:student_email, "jane@example.com", version: 0).expect(:course_id, "c1", version: 2)
+
+    condition.tags.map { |tag, _| tag.hashed? }.should eq([true, false])
+    condition.empty?.should be_false
+    ES::AppendCondition.new.empty?.should be_true
   end
 end
 
@@ -232,9 +328,8 @@ module PostgresAppendConditionSpec
     store
   end
 
-  # Lets `count` deciders read, then releases them to append all at once, so
-  # every decision is taken on the same stale read. Returns how many appends
-  # succeeded and how many hit a conflict.
+  # Releases `count` racers at once and returns how many appends succeeded and
+  # how many hit a conflict
   def self.race(count : Int32, &decide : -> Nil) : {Int32, Int32}
     go = Channel(Nil).new
     results = Channel(Symbol).new(count)
@@ -265,14 +360,24 @@ describe "ES::EventStoreAdapters::Postgres#append with a condition" do
   if PostgresAppendConditionSpec::URL
     append_scenarios { |hasher| PostgresAppendConditionSpec.fresh_store(hasher).as(ES::EventStore) }
 
-    it "lets exactly one of many concurrent decisions on a full course through" do
+    it "creates the tag versions table on an existing store" do
+      store = PostgresAppendConditionSpec.fresh_store(nil)
+      PostgresAppendConditionSpec.db.exec %(DROP TABLE "eventstore"."tag_versions")
+
+      store.setup
+
+      store.append(defined(UUID.v7))
+      PostgresAppendConditionSpec.db.query_one(%(SELECT count(*) FROM "eventstore"."tag_versions"), as: Int64).should eq(1)
+    end
+
+    it "lets exactly one of many decisions taken on the same state through" do
       store = PostgresAppendConditionSpec.fresh_store(append_hasher)
       course = UUID.v7
       store.append(defined(course, capacity: 1))
-      seen = store.read(course_query(course)).last.position
+      decision = store.read_for_decision(course_query(course))
 
       appended, conflicts = PostgresAppendConditionSpec.race(8) do
-        store.append([joined(course)], ES::AppendCondition.new(course_query(course), after: seen))
+        store.append([joined(course)], decision.condition)
         nil
       end
 
@@ -283,10 +388,9 @@ describe "ES::EventStoreAdapters::Postgres#append with a condition" do
 
     it "lets exactly one of many concurrent registrations of the same hashed email through" do
       store = PostgresAppendConditionSpec.fresh_store(append_hasher)
-      query = ES::Query.new(ES::QueryItem.new(AppendAccountRegistered, tags: {student_email: "jane@example.com"}))
 
       appended, conflicts = PostgresAppendConditionSpec.race(8) do
-        store.append([registered("jane@example.com")], ES::AppendCondition.new(query))
+        store.append([registered("jane@example.com")], ES::AppendCondition.new.expect(:student_email, "jane@example.com", version: 0))
         nil
       end
 
@@ -294,7 +398,7 @@ describe "ES::EventStoreAdapters::Postgres#append with a condition" do
       conflicts.should eq(7)
     end
 
-    it "does not serialize concurrent decisions on different boundaries against each other" do
+    it "does not let decisions on different boundaries conflict" do
       store = PostgresAppendConditionSpec.fresh_store(append_hasher)
       courses = Array.new(8) { UUID.v7 }
       courses.each { |course| store.append(defined(course)) }
@@ -302,7 +406,7 @@ describe "ES::EventStoreAdapters::Postgres#append with a condition" do
 
       appended, conflicts = PostgresAppendConditionSpec.race(8) do
         course = courses[index.add(1)]
-        store.append([joined(course)], ES::AppendCondition.new(course_query(course), after: store.read(course_query(course)).last.position))
+        store.append([joined(course)], store.read_for_decision(course_query(course)).condition)
         nil
       end
 
@@ -310,62 +414,70 @@ describe "ES::EventStoreAdapters::Postgres#append with a condition" do
       conflicts.should eq(0)
     end
 
-    # The interleaving a lock-free read gets wrong: a matching event with a lower
-    # position commits after a higher one, between the read and the check, so
-    # the check — looking past the highest position read — never sees it.
-    it "does not let a read miss a matching event that commits late with a lower position" do
+    it "keeps versions gap-free and unique under concurrent appends of one tag" do
       store = PostgresAppendConditionSpec.fresh_store(append_hasher)
       course = UUID.v7
-      store.append(defined(course))
-      db = PostgresAppendConditionSpec.db
-      late = joined(course)
-      lock_names = ["*", "handle:#{late.header.event_handle}"] + late.tags.map { |tag| "tag:#{tag.plain}" }
 
-      # Writer one takes its locks as `append` does and inserts, but does not commit yet
-      writer = db.checkout
-      writer.exec "BEGIN"
-      lock_names.each { |name| writer.exec %(SELECT pg_advisory_xact_lock_shared($1, $2)), ES::EventStoreAdapters::Postgres::LOCK_NAMESPACE, ES::EventStoreAdapters::Postgres.lock_key(name) }
-      writer.exec %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2)), late.header.with_tags(late.tags.map(&.plain)).to_json, late.body.to_json
+      PostgresAppendConditionSpec.race(8) do
+        store.append([joined(course), joined(course)])
+        nil
+      end
 
-      # Writer two gets a higher position and commits first
-      store.append(joined(course))
-
-      read = Channel(Array(ES::EventStore::Event)).new(1)
-      spawn { read.send(store.read(course_query(course))) }
-      sleep 200.milliseconds
-      writer.exec "COMMIT"
-      writer.release
-      seen = read.receive
-
-      # The read must have waited for writer one rather than come back without it
-      seen.map(&.header["event_id"].as_s).should contain(late.header.event_id.to_s)
-      seen.size.should eq(3)
+      versions = store.read(course_query(course)).map { |event| versions_of(event)["course_id:#{course}"] }
+      versions.sort.should eq((1_i64..16_i64).to_a)
+      store.read_for_decision(course_query(course)).versions["course_id:#{course}"].should eq(16)
     end
 
-    it "does not let a plain append slip past a concurrent check" do
+    it "does not let a plain append slip past a concurrent conditional one" do
       store = PostgresAppendConditionSpec.fresh_store(append_hasher)
       course = UUID.v7
       store.append(defined(course))
-      seen = store.read(course_query(course)).last.position
+      decision = store.read_for_decision(course_query(course))
       toggle = Atomic(Int32).new(0)
 
-      # Half the racers append unconditionally, half on the condition. Whatever
-      # the interleaving, a conditional append may only succeed if no plain
-      # append to the course committed before its check.
-      PostgresAppendConditionSpec.race(8) do
+      # Half the racers append unconditionally, half on the decision. Whatever
+      # the interleaving, a conditional append may only succeed if nothing else
+      # carrying the course tag committed before it, so at most one does.
+      appended, _ = PostgresAppendConditionSpec.race(8) do
         if toggle.add(1).even?
           store.append(joined(course))
         else
-          store.append([joined(course)], ES::AppendCondition.new(course_query(course), after: seen))
+          store.append([joined(course)], decision.condition)
         end
         nil
       end
 
-      events = store.read(course_query(course), after: seen)
-      events.size.should be >= 4
-      # The check passes only for the first event of the course after `seen`,
-      # so at most one conditional append can be among the events.
-      (events.size - 4).should be <= 1
+      (appended - 4).should be <= 1
+      store.read(course_query(course)).size.should eq(appended + 1)
+    end
+
+    # The interleaving positions get wrong: a write still in flight while the
+    # decision reads. The read neither waits for it nor sees it, and the append
+    # fails once it committed, because it raised the tag's version.
+    it "catches a write that was in flight while the decision read" do
+      store = PostgresAppendConditionSpec.fresh_store(append_hasher)
+      course = UUID.v7
+      store.append(defined(course))
+      db = PostgresAppendConditionSpec.db
+      tag = "course_id:#{course}"
+
+      # A writer takes the tag's row as `append` does and raises it, but does not commit yet
+      writer = db.checkout
+      writer.exec "BEGIN"
+      writer.exec %(UPDATE "eventstore"."tag_versions" SET version = version + 1 WHERE tag = $1), tag
+
+      read = Channel(ES::Decision).new(1)
+      spawn { read.send(store.read_for_decision(course_query(course))) }
+      decision = select
+      when value = read.receive then value
+      when timeout(2.seconds) then raise "the decision read waited for the writer"
+      end
+      decision.versions[tag].should eq(1)
+
+      writer.exec "COMMIT"
+      writer.release
+
+      expect_raises(ES::Exception::Conflict) { store.append([joined(course)], decision.condition) }
     end
   else
     pending "runs the append scenarios and races against Postgres (set ES_TEST_DATABASE_URL)", tags: "db" do

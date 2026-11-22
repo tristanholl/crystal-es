@@ -28,7 +28,7 @@ The library provides:
 - **Events** — immutable facts with a type-safe DSL
 - **Projections** — read models built from event streams, with a schema DSL and schema drift detection
 - **Event Bus** — fan-out published events to reactors and projections
-- **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that nothing a decision depended on changed (see [Tags](#tags), [Querying by tag](#querying-by-tag) and [Conditional appends](#conditional-appends))
+- **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that none of the tags a decision depended on moved (see [Tags](#tags), [Querying by tag](#querying-by-tag) and [Tag versions and conditional appends](#tag-versions-and-conditional-appends))
 - **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
 
 A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction). [`./examples/course-subscription`](./examples/course-subscription) shows dynamic consistency boundaries: course capacity and a per-student limit enforced together, unique hashed emails, and erasure.
@@ -101,7 +101,7 @@ StudentSubscribed.new(
 
 - The constructor takes the tag values as one `tags:` named tuple, whose keys and types the compiler checks against the declarations. Every declared tag must be present. One declared with a nilable type, such as `UUID?`, may be `nil`, and then the event carries no such tag. An event without tags has no `tags:` argument.
 - Values are stored in their `to_s` form, so a query matches when it passes a value with the same `to_s`. In practice, use the same type.
-- The event store writes tags to the event header (`header.tags`) on append, in their stored form. `event.tags` holds the plaintext values the event was built with. An event read back only has the stored form, and a hashed tag only its digest. Put a value in an attribute too if code needs it after reading the event back. Appending a read-back event again keeps its stored tags exactly as they are, without hashing them again. A store with a different application key, or with no tag hasher, won't find its hashed tags. Stored tags are checked before they are kept, because a header can also come from elsewhere, such as a queue message. Every key must be declared by the event class, and a hashed key must hold a digest. Otherwise the append raises `ES::Exception::InvalidState`.
+- The event store writes tags to the event header (`header.tags`) on append, in their stored form, together with their versions (`header.tag_versions`, see [Tag versions](#tag-versions-and-conditional-appends)). `event.tags` holds the plaintext values the event was built with. An event read back only has the stored form, and a hashed tag only its digest. Put a value in an attribute too if code needs it after reading the event back. Appending a read-back event again keeps its stored tags exactly as they are, without hashing them again. A store with a different application key, or with no tag hasher, won't find its hashed tags. Stored tags are checked before they are kept, because a header can also come from elsewhere, such as a queue message. Every key must be declared by the event class, and a hashed key must hold a digest. Otherwise the append raises `ES::Exception::InvalidState`.
 - A tag without a type, a duplicate tag, an unknown option, a non-boolean `hashed:`, or an attribute named `tags` next to declared tags is a compile error.
 - If the same tag key is `hashed: true` in one event and `hashed: false` in another, compilation emits a warning. Keeping a key consistent across events is the application's job: a query hashes a tag value according to how the key is declared, so the inconsistent events would not be found.
 
@@ -341,7 +341,7 @@ bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 
 #### Querying by tag
 
-`read(query, after: nil, limit: nil)` returns the events a decision depends on, selected by type and [tag](#tags) rather than by aggregate:
+`read(query, after: nil, limit: nil)` returns events selected by type and [tag](#tags) rather than by aggregate:
 
 ```crystal
 query = ES::Query.new(
@@ -357,45 +357,67 @@ events.last.position # => position of the last matching event
 - An item without types matches every type (`ES::QueryItem.new(tags: {...})`). An item without tags matches regardless of tags. `ES::Query.all` matches every event.
 - Tag values are given in plaintext. A value is hashed before matching when its key is declared `hashed: true` on an event, so a query never repeats that decision. A query for a hashed tag needs the tag hasher, like an append.
 - Events come back in append order, each with its `position` in the store. Positions only increase but are not gapless. `after:` returns only events past a position, `limit:` caps how many are returned.
-- Positions are not commit-ordered: concurrent appends can commit in the opposite order of their positions. Don't use `after:` as a cursor to follow the store, because re-reading after the last position you saw can miss an event that committed late with a lower position. A position marks the last event a decision saw.
+- Positions order events and page through results. They play no part in consistency, which rests on [tag versions](#tag-versions-and-conditional-appends). They are not commit-ordered: concurrent appends can commit in the opposite order of their positions. So don't use `after:` as a cursor to follow the store, because re-reading after the last position you saw can miss an event that committed late with a lower position.
 - An event whose encryption key was destroyed still comes back, with its header (type, tags, position) and a `nil` body, flagged `body_erased?`. Erasure removes the data, not the fact that something happened. A course still counts the subscription of an erased student, and can show it as "deleted user". Materializing such an event into its class raises `ES::Exception::InvalidState`, so check `body_erased?` first.
 
 In Postgres, `setup` creates a GIN index on `header->'tags'` (`jsonb_path_ops`) and a btree index on the event handle, on new and existing stores alike. On a large existing store, building them blocks appends while it runs. Create them beforehand with `CREATE INDEX CONCURRENTLY`, using the definitions in `ES::EventStoreAdapters::Postgres::TAGS_INDEX` and `EVENT_HANDLE_INDEX`. A concurrent build that fails leaves an invalid index behind, which `setup` then skips because the name exists. `setup` logs a warning for every invalid index in the `eventstore` schema. Drop it and build it again.
 
-#### Conditional appends
+#### Tag versions and conditional appends
 
-`append(events, condition)` appends a batch atomically, all or nothing. With a condition, it appends only if no event matching the condition's query was appended after the given position. Otherwise it raises `ES::Exception::Conflict` (HTTP 409) and appends nothing. Together with `read`, this gives a consistency boundary drawn around tags instead of one aggregate: read, decide, append on the condition that nothing the decision depended on changed in between.
+Every tag has a **version** in the store: the number of events carrying it. Each tagged event raises the version of each of its tags by one, and the store stamps the new values into its header:
+
+```json
+"tags": ["course_id:0192…", "student_id:0193…"],
+"tag_versions": {"course_id:0192…": 8, "student_id:0193…": 2}
+```
+
+Appends carrying the same tag never run at the same time, so the versions of one tag have no gaps and follow commit order, whatever positions the events get. That makes "the tag is still at version 8" mean exactly "nothing carrying this tag was appended since". This is the basis for consistency.
+
+`append(events, condition)` appends a batch atomically, all or nothing. With an `ES::AppendCondition`, it appends only if every tag the condition names is still at the version it expects. Otherwise it raises `ES::Exception::Conflict` (HTTP 409), naming the tag key but never its value, and appends nothing.
+
+**A decision read** returns the events of a query together with the current version of each of its tags, read in one snapshot so the two agree. Its `condition` guards the append the decision leads to:
 
 ```crystal
-query  = ES::Query.new(ES::QueryItem.new(CourseDefined, StudentSubscribed, tags: {course_id: course_id}))
-events = event_store.read(query)
+query = ES::Query.new(
+  ES::QueryItem.new(CourseDefined, StudentSubscribed, tags: {course_id: course_id}),
+  ES::QueryItem.new(StudentSubscribed, tags: {student_id: student_id}),
+)
+decision = event_store.read_for_decision(query)
 
-# ... decide on events, e.g. check the course isn't full ...
+# ... fold decision.events, decide, e.g. check the course isn't full ...
 
 event_store.append(
   [StudentSubscribed.new(
     actor_id: actor, command_handler: "Subscribe", course_id: course_id, student_id: student_id,
     tags: {course_id: course_id, student_id: student_id}
   )],
-  ES::AppendCondition.new(query, after: events.last?.try(&.position))
+  decision.condition
 )
 ```
 
-- Pass the position of the **last event `read` returned for the same query**, or `nil` if it returned none. `nil` fails if any matching event exists, which is how a uniqueness rule is written (`tags: {student_email: email}`, `after: nil`). Don't take the position from elsewhere, such as the head of the store or a read of a different query. Positions are not commit-ordered, so the check could miss a matching event that committed late.
-- `append(event)` still works and now returns the event's position. `append(events)` takes an array of any event type, e.g. `[StudentSubscribed.new(...)]`, without casting.
-- In Postgres, appends and reads use transaction-scoped advisory locks:
-  - Every append takes shared locks on the tags and type of the events it writes. Plain appends never wait for each other.
-  - A conditional append takes an exclusive lock on what its query selects, then runs the check and the inserts in the same READ COMMITTED transaction. The check waits for any in-flight append it could match.
-  - `read` takes the same exclusive locks while its `SELECT` runs. Without them, a matching event could commit after a higher-positioned one the read returned, below the position the check looks after, and never be seen. Reads and appends of the same boundary therefore wait for each other briefly. Unrelated boundaries never wait for each other.
-  - A batch carrying more than `MAX_LOCK_KEYS` (64) distinct tags and types locks the whole store exclusively instead, so a large import can't exhaust Postgres' shared lock table.
-  - The locks use the two-key form of `pg_advisory_xact_lock` under their own namespace (`LOCK_NAMESPACE`), so they don't collide with advisory locks your application takes with the one-key form.
-- An item without tags locks by type, and `ES::Query.all` locks the whole store. A read or condition like that blocks every append it could match for as long as it runs, so use the narrowest tags the rule allows. Use `each_event` for full scans.
-- The guarantee holds only if every writer follows the lock protocol:
-  - Don't insert into `eventstore.events` by other means.
-  - Don't let an older crystal-es version write to the store while tag reads or conditional appends are in use. During a rolling upgrade, wait until every writer runs 0.11 or later.
-  - Leave the events id sequence at its default `CACHE 1`. A cached sequence hands out positions out of order across connections.
+**Deciding on eventually consistent data.** Every stored event carries its tag versions, so anything that applied the events, such as a projection, knows which version of each tag it reflects. Pass those versions as the condition, and the append fails if any of those tags moved since the data was built:
 
-The GIN index finds every event carrying a tag, but it can't narrow by position. A query or an `after:` check therefore costs in proportion to the number of events carrying its tags. That is cheap for the narrow tags consistency boundaries are made of (one course, one student), and slow for a tag shared by a large part of the store, such as a tenant id.
+```crystal
+condition = ES::AppendCondition.new
+  .expect(:user_id, user_id, version: 7)                 # plaintext tag; hashed if declared so
+  .expect_stored("organization_id:0192…", 3)             # stored form, as found in header.tag_versions
+```
+
+**Uniqueness.** Version 0 means the tag was never used: `ES::AppendCondition.new.expect(:email, email, version: 0)`.
+
+- **What a version counts:** every event carrying the tag, whatever its type and other tags. Any change to an expected tag fails the condition, including events of types the decision didn't read. Such a conflict causes a retry, never a missed conflict. Keep tags narrow (one course, one student) to keep retries rare.
+- **Items without tags:** a decision read refuses any query item that names no tags, including `ES::Query.all`, because there is no tag whose version could detect a change. Plain `read` still accepts such items.
+- **Versions are assigned by the store,** never taken from the event as given. An event read back and appended into another store gets that store's versions.
+- `append(event)` still works and now returns the event's position. `append(events)` takes an array of any event type, e.g. `[StudentSubscribed.new(...)]`, without casting.
+- **In Postgres:**
+  - Versions live in `eventstore.tag_versions`, one row per distinct tag value, never deleted. `setup` creates the table on new and existing stores. Each row holds the stored tag, so a plain value such as an email address is kept there in the clear for as long as the store exists, in addition to the event headers. Use `hashed: true` for personal data.
+  - An append locks the rows of all tags its events carry or its condition names, in one statement and in tag order, then checks, inserts and raises the versions in the same READ COMMITTED transaction. Two appends carrying the same tag therefore run one after the other. Untagged appends lock nothing.
+  - `read` and `read_for_decision` take no locks. `read_for_decision` runs in a REPEATABLE READ snapshot.
+- **The guarantee holds only if every writer raises tag versions:**
+  - Don't insert into `eventstore.events` by other means.
+  - During a rolling upgrade, wait until every writer runs 0.11 or later before relying on conditions.
+
+The GIN index finds every event carrying a tag, but it can't narrow by position. A query therefore costs in proportion to the number of events carrying its tags. That is cheap for the narrow tags consistency boundaries are made of (one course, one student), and slow for a tag shared by a large part of the store, such as a tenant id.
 
 ---
 

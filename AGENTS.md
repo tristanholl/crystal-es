@@ -36,7 +36,7 @@ The compiler floor is `crystal: '>= 1.14.0'` (`shard.yml`). Don't use stdlib API
 - **`setup` is idempotent and also runs on existing stores.** An existing store takes the early-return branch, so anything new (an index, for example) must be applied there too, with `IF NOT EXISTS`. Mind that index builds block writes on large tables.
 - **Projection schemas are immutable.** Schema drift raises; there's no in-place migration.
 - **Adapter parity.** Every event store feature exists in both the Postgres and in-memory adapters, with the same semantics. Write the specs as shared scenarios run against both (see `spec/adapters/eventstores/read_query_spec.cr`).
-- **The dynamic-consistency-boundary lock protocol.** Every Postgres append and read goes through `locked_transaction`/`lock_plan` (`src/adapters/eventstores/postgres.cr`). A write path that skips the locks breaks conditional appends silently.
+- **Tag versions.** Every tagged append must raise the version of each of its tags under the row lock in `eventstore.tag_versions`, and stamp it into the stored header (`append_batch` in `src/adapters/eventstores/postgres.cr`). Header tags and raised versions both come from `stored_tags`. A write path that skips this breaks conditional appends silently. Consistency must never rest on positions, which aren't commit-ordered.
 
 ## Code conventions
 

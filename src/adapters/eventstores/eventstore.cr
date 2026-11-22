@@ -28,11 +28,12 @@ module ES
     # decision depends on, selected by type and tag rather than by aggregate.
     # `after` returns only events past that position, `limit` caps the count.
     #
-    # Positions are not commit-ordered: two concurrent appends may commit in the
-    # opposite order of their positions. A position is therefore no cursor for
-    # following the store — reading again `after` the last position seen can
-    # miss an event that committed late with a lower one. Use it for what a
-    # consistency boundary needs: the position of the last event a decision saw.
+    # Positions order events and page through results; they play no part in
+    # consistency. They are not commit-ordered — two concurrent appends may
+    # commit in the opposite order of their positions — so a position is no
+    # cursor for following the store either: reading again `after` the last
+    # position seen can miss an event that committed late with a lower one.
+    # Consistency rests on tag versions instead (see `read_for_decision`).
     #
     # An event whose encryption key was destroyed still comes back, with its
     # header but without its body (`body_erased?`). Erasure removes the data, not
@@ -48,14 +49,29 @@ module ES
       raise ES::Exception::NotImplemented.new("#{self.class.name} does not support queries")
     end
 
-    # Appends several events atomically — all or none — and, given a condition,
-    # only if no event matching its query was appended after its position.
-    # Raises `ES::Exception::Conflict` when one was, and appends nothing.
+    # Returns the events matching a query together with the current version of
+    # every tag the query names, read in one snapshot so the two agree. Its
+    # `condition` guards the append the decision leads to: it fails if anything
+    # carrying one of those tags was appended since.
     #
-    # This is the write side of a dynamic consistency boundary: read the events
-    # a decision depends on, decide, then append on the condition that nothing
-    # the decision depended on changed in between. Returns the position of the
-    # last appended event.
+    # Every item of the query must name tags — a version exists per tag, so an
+    # item selecting by type alone has nothing that could detect a change.
+    #
+    # Not abstract, so event store adapters written before decisions existed
+    # still compile; they raise when asked.
+    def read_for_decision(query : ES::Query) : ES::Decision
+      raise ES::Exception::NotImplemented.new("#{self.class.name} does not support decision reads")
+    end
+
+    # Appends several events atomically — all or none — and, given a condition,
+    # only if every tag it names is still at the version it expects. Raises
+    # `ES::Exception::Conflict` otherwise, and appends nothing.
+    #
+    # This is the write side of a dynamic consistency boundary: read what a
+    # decision depends on, decide, then append on the condition that none of it
+    # changed in between. Every tagged append raises the version of each of its
+    # tags and stamps the new values into the stored header. Returns the
+    # position of the last appended event.
     #
     # Takes an array of any event type — `[StudentSubscribed.new(...)]` is an
     # `Array(StudentSubscribed)`, which Crystal would not pass where an
@@ -72,8 +88,9 @@ module ES
       raise ES::Exception::NotImplemented.new("#{self.class.name} does not support batch or conditional appends")
     end
 
-    # An event ready to be stored, with what locking and matching need to know
-    protected record EncodedEvent, event : ES::Event, header : String, body : String, handle : String, tags : Array(String)
+    # An event ready to be stored: its body, and its tags in stored form. The
+    # header is only built once the tag versions are known.
+    protected record EncodedEvent, event : ES::Event, body : String, tags : Array(String)
 
     # Encodes a batch before anything is written, so a hashing or encryption
     # failure on any one event leaves the store untouched
@@ -81,17 +98,70 @@ module ES
       raise ES::Exception::InvalidState.new("Nothing to append: the batch is empty") if events.empty?
 
       events.map do |event|
-        EncodedEvent.new(event, encode_header(event), encode_body(event), event.header.event_handle, stored_tags(event))
+        EncodedEvent.new(event, encode_body(event), stored_tags(event))
       end
     end
 
-    # The error raised when an append condition fails. Names no tag values,
-    # which may be personal data.
-    protected def append_conflict(condition : ES::AppendCondition) : ES::Exception::Conflict
+    # The header JSON to persist, carrying the event's stored tags and the
+    # versions this append assigned them. Built from the event's own header with
+    # both replaced, so neither can be smuggled in on the event as given.
+    protected def stored_header(event : EncodedEvent, versions : Hash(String, Int64)) : String
+      event.event.header.with_tags(event.tags, versions).to_json
+    end
+
+    # Assigns tag versions to a batch in order: each event raises every one of
+    # its tags by one, starting from `current`, which is updated in place to the
+    # versions after the batch. Returns each event's versions.
+    protected def assign_versions(encoded : Array(EncodedEvent), current : Hash(String, Int64)) : Array(Hash(String, Int64))
+      encoded.map do |event|
+        versions = {} of String => Int64
+        event.tags.each do |tag|
+          version = current.fetch(tag, 0_i64) + 1
+          current[tag] = version
+          versions[tag] = version
+        end
+        versions
+      end
+    end
+
+    # The versions a condition expects, by stored tag
+    protected def expected_versions(condition : ES::AppendCondition) : Hash(String, Int64)
+      expected = {} of String => Int64
+      entries = condition.tags.map { |tag, version| {encode_tag(tag), version, tag.key} } +
+                condition.stored_tags.map { |tag, version| {tag, version, tag.partition(':')[0]} }
+
+      entries.each do |tag, version, key|
+        # Messages name keys only, never values, which may be personal data
+        raise ES::Exception::InvalidState.new("Append condition expects tag '#{key}' at two different versions") if expected.has_key?(tag) && expected[tag] != version
+        expected[tag] = version
+      end
+
+      expected
+    end
+
+    # The first tag whose current version differs from the expected one, or nil
+    protected def version_mismatch(expected : Hash(String, Int64), current : Hash(String, Int64)) : String?
+      expected.each do |tag, version|
+        return tag if current.fetch(tag, 0_i64) != version
+      end
+      nil
+    end
+
+    # The error raised when an append condition fails. Names the tag key only,
+    # never its value, which may be personal data.
+    protected def append_conflict(tag : String) : ES::Exception::Conflict
       ES::Exception::Conflict.new(
-        "Append condition failed: an event matching the query was appended after position #{condition.after || "none"}",
+        "Append condition failed: tag '#{tag.partition(':')[0]}' is no longer at the expected version",
         status_code: HTTP::Status::CONFLICT
       )
+    end
+
+    # The stored tags a decision read captures versions for. Refuses an item
+    # without tags: nothing could tell whether what it selects has changed.
+    protected def decision_tags(items : Array(EncodedQueryItem)) : Array(String)
+      raise ES::Exception::InvalidState.new("A decision read needs every query item to name tags; an item selecting by type alone cannot detect a change") if items.any?(&.tags.empty?)
+
+      items.flat_map(&.tags).uniq!
     end
 
     # Refuses read options that have no sensible meaning
@@ -128,7 +198,7 @@ module ES
     # A query item with its tags in stored form, ready to match against headers
     protected record EncodedQueryItem, types : Array(String), tags : Array(String)
 
-    # Encodes the tags of every item of a query the way `encode_header` encodes
+    # Encodes the tags of every item of a query the way `stored_tags` encodes
     # them on append, so a query for a hashed tag compares digests, never values
     protected def encode_query(query : ES::Query) : Array(EncodedQueryItem)
       query.items.map do |item|
@@ -136,24 +206,15 @@ module ES
       end
     end
 
-    # Returns the header JSON to persist, carrying the event's tags in their
-    # stored form.
+    # The tags an event is stored with — the ones its stored header carries, and
+    # the ones whose versions its append raises. Deriving both here keeps them
+    # from drifting apart: a tag stored without its version raised would slip
+    # past conditional appends.
     #
-    # The tags are derived here rather than when the event is built, because a
-    # hashed tag needs the store's hasher. That also means the plaintext value of
-    # a hashed tag never sits on a header that could be serialized elsewhere.
-    #
-    # An event without plaintext tags keeps the header's stored tags as they are,
-    # which is what an event read back and appended again carries.
-    protected def encode_header(event : ES::Event) : String
-      return event.header.to_json if event.tags.empty?
-
-      event.header.with_tags(stored_tags(event)).to_json
-    end
-
-    # The tags an event is stored with — the ones `encode_header` writes, and the
-    # ones the Postgres store locks. Deriving both here keeps them from drifting
-    # apart: a tag stored but not locked would slip past conditional appends.
+    # The tags are derived in the store rather than when the event is built,
+    # because a hashed tag needs the store's hasher. That also means the
+    # plaintext value of a hashed tag never sits on a header that could be
+    # serialized elsewhere.
     #
     # An event built through `define_event` brings plaintext tags, encoded here.
     # One read back brings stored tags in its header instead, kept as they are —
@@ -175,14 +236,11 @@ module ES
         key, _, value = tag.partition(':')
         hashed = declared[key]?
         raise ES::Exception::InvalidState.new("'#{event.class.name}' carries a stored tag '#{key}' it does not declare") if hashed.nil?
-        raise ES::Exception::InvalidState.new("'#{event.class.name}' carries a stored tag '#{key}' that is declared hashed but holds no digest") if hashed && !value.matches?(STORED_DIGEST)
+        raise ES::Exception::InvalidState.new("'#{event.class.name}' carries a stored tag '#{key}' that is declared hashed but holds no digest") if hashed && !value.matches?(ES::TagHasher::STORED_DIGEST)
       end
 
       stored
     end
-
-    # What `ES::TagHasher` stores for a hashed tag's value
-    private STORED_DIGEST = /\A[0-9a-f]{#{ES::TagHasher::DIGEST_SIZE * 2}}\z/
 
     # Returns the stored form of one tag
     protected def encode_tag(tag : ES::Tag) : String
@@ -224,14 +282,6 @@ module ES
       ES::EventStore::Event.new(header, encryption.open(body, parsed_header), position)
     end
 
-    # Same as #decode, but tolerates a body encrypted under a key that has since
-    # been destroyed. Only some events in a stream may be encrypted at all —
-    # typically the ones carrying PII — so one shredded key must not stop a
-    # projector from replaying everything else. Logs a warning and returns nil
-    # instead of raising; #each_event uses this so a full-stream scan skips that
-    # one event and keeps going. #fetch_event and #fetch_events still call
-    # #decode directly: asking for one specific event or aggregate stream should
-    # fail loudly, not silently come back short.
     # Same as #decode, but returns an event whose body was encrypted under a
     # destroyed key as header only, flagged `body_erased?`. #read uses this so
     # erasing a subject's data leaves the shape of every stream it appears in
@@ -246,6 +296,14 @@ module ES
       ES::EventStore::Event.new(header, JSON::Any.new(nil), position, body_erased: true)
     end
 
+    # Same as #decode, but tolerates a body encrypted under a key that has since
+    # been destroyed. Only some events in a stream may be encrypted at all —
+    # typically the ones carrying PII — so one shredded key must not stop a
+    # projector from replaying everything else. Logs a warning and returns nil
+    # instead of raising; #each_event uses this so a full-stream scan skips that
+    # one event and keeps going. #fetch_event and #fetch_events still call
+    # #decode directly: asking for one specific event or aggregate stream should
+    # fail loudly, not silently come back short.
     protected def decode_or_skip(header : JSON::Any, body : JSON::Any) : ES::EventStore::Event?
       decode(header, body)
     rescue ex : ES::Exception::NotFound

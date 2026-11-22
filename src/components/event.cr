@@ -28,6 +28,13 @@ module ES
       @[JSON::Field(ignore_serialize: tags.empty?)]
       getter tags : Array(String) = [] of String
 
+      # The version of each stored tag this event raised it to — the number of
+      # events carrying that tag up to and including this one. Assigned by the
+      # event store on append, never taken from the event as given, and empty on
+      # an untagged event. What `ES::AppendCondition` compares against.
+      @[JSON::Field(ignore_serialize: tag_versions.empty?)]
+      getter tag_versions : Hash(String, Int64) = {} of String => Int64
+
       # Default constructor
       def initialize; end
 
@@ -46,10 +53,15 @@ module ES
       end
 
       # Returns a copy of this header carrying the given stored tags
-      def with_tags(tags : Array(String)) : Header
+      def with_tags(tags : Array(String), versions : Hash(String, Int64) = {} of String => Int64) : Header
         copy = dup
         copy.tags = tags
+        copy.tag_versions = versions
         copy
+      end
+
+      # See `tags=`
+      protected def tag_versions=(@tag_versions : Hash(String, Int64))
       end
 
       # A method rather than `setter tags : Array(String)`: re-declaring the typed
@@ -114,7 +126,8 @@ module ES
     # `define_event` generated, whether it is registered or not.
     #
     # The same pass generates `tag_key_hashed?`, which is how a query decides
-    # whether to hash a value. A key declared hashed by any event is hashed.
+    # whether to hash a value — a key declared hashed by any event is hashed —
+    # and `tag_key_declared?`, which append conditions check their keys against.
     macro finished
       {% seen = {} of StringLiteral => ASTNode %}
       {% hashed_keys = [] of StringLiteral %}
@@ -130,6 +143,15 @@ module ES
           {% end %}
         {% end %}
       {% end %}
+
+      # Whether any event declares the tag key
+      def self.tag_key_declared?(key : String) : Bool
+        {% if seen.empty? %}
+          false
+        {% else %}
+          {{ seen.keys }}.includes?(key)
+        {% end %}
+      end
 
       # Whether any event declares the tag key `hashed: true`
       def self.tag_key_hashed?(key : String) : Bool

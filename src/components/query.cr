@@ -74,32 +74,3 @@ module ES
     end
   end
 end
-
-module ES
-  # The consistency check of a conditional append: fail if an event matching the
-  # query was appended after the given position.
-  #
-  # The usual shape is read, decide, append — with the same query and the
-  # position of the last event the read returned:
-  #
-  # ```
-  # events = store.read(query)
-  # # ... decide on events ...
-  # store.append([event], ES::AppendCondition.new(query, after: events.last?.try(&.position)))
-  # ```
-  #
-  # `after` must be the position of the last event `read` returned for the same
-  # query, or nil if it returned none. That read waits for in-flight appends it
-  # could match, so no matching event can commit later with a lower position.
-  # Positions are not commit-ordered, so a position taken from elsewhere — the
-  # head of the store, a read of another query — can be past a matching event
-  # that committed late, which the check would then not see.
-  struct AppendCondition
-    getter fail_if_events_match : ES::Query
-    getter after : Int64?
-
-    def initialize(@fail_if_events_match : ES::Query, @after : Int64? = nil)
-      raise ES::Exception::InvalidState.new("after must not be negative, got #{after}") if after && after < 0
-    end
-  end
-end

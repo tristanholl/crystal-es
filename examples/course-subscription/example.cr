@@ -67,6 +67,7 @@ end
 
 registration = store.read(ES::Query.new(ES::QueryItem.new(Events::StudentRegistered, tags: {student_id: alice}))).first
 puts "Tags as stored for alice: #{registration.header["tags"]}"
+puts "Tag versions stamped on it: #{registration.header["tag_versions"]}"
 
 # --- Capacity and per-student limit under concurrency ----------------------------
 

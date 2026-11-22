@@ -33,6 +33,9 @@ module ES
     # and a collision could only ever cause a false match, never hide an event.
     DIGEST_SIZE = 16
 
+    # What `encode` stores for a hashed tag's value
+    STORED_DIGEST = /\A[0-9a-f]{#{DIGEST_SIZE * 2}}\z/
+
     def initialize(application_key : ES::ApplicationEncryptionKeyManager)
       @key = application_key.derive_key(KEY_LABEL)
     end
