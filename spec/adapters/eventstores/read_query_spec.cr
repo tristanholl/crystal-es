@@ -13,7 +13,7 @@ class QueryCourseDefined < ES::Event
   define_event "course", "query_test.course_defined" do
     attribute :course_id, UUID
     attribute :capacity, Int32
-    tag :course_id
+    tag :course_id, UUID
   end
 end
 
@@ -24,9 +24,9 @@ class QueryStudentSubscribed < ES::Event
     attribute :course_id, UUID
     attribute :student_id, UUID
     attribute :student_email, String
-    tag :course_id
-    tag :student_id
-    tag :student_email, hashed: true
+    tag :course_id, UUID
+    tag :student_id, UUID
+    tag :student_email, String, hashed: true
   end
 end
 
@@ -36,17 +36,20 @@ class QueryProfileRecorded < ES::Event
   define_event "course", "query_test.profile_recorded", encrypted: true do
     attribute :course_id, UUID
     attribute :student_email, String
-    tag :course_id
-    tag :student_email, hashed: true
+    tag :course_id, UUID
+    tag :student_email, String, hashed: true
   end
 end
 
 private def course_defined(course_id : UUID, capacity = 10)
-  QueryCourseDefined.new(actor_id: nil, command_handler: "test", course_id: course_id, capacity: capacity)
+  QueryCourseDefined.new(actor_id: nil, command_handler: "test", course_id: course_id, capacity: capacity, tags: {course_id: course_id})
 end
 
 private def subscribed(course_id : UUID, student_id = UUID.v7, email = "jane@example.com")
-  QueryStudentSubscribed.new(actor_id: nil, command_handler: "test", course_id: course_id, student_id: student_id, student_email: email)
+  QueryStudentSubscribed.new(
+    actor_id: nil, command_handler: "test", course_id: course_id, student_id: student_id, student_email: email,
+    tags: {course_id: course_id, student_id: student_id, student_email: email}
+  )
 end
 
 private def event_ids(events : Array(ES::EventStore::Event)) : Array(UUID)
@@ -154,8 +157,8 @@ private def read_scenarios(&build : ES::TagHasher?, ES::EncryptionKeyManager? ->
     store = build.call(query_hasher, encryption)
     course = UUID.v7
     key_id, kept_key_id = encryption.create_key, encryption.create_key
-    erased = QueryProfileRecorded.new(actor_id: nil, command_handler: "test", encryption_key_id: key_id, course_id: course, student_email: "jane@example.com")
-    kept = QueryProfileRecorded.new(actor_id: nil, command_handler: "test", encryption_key_id: kept_key_id, course_id: course, student_email: "john@example.com")
+    erased = QueryProfileRecorded.new(actor_id: nil, command_handler: "test", encryption_key_id: key_id, course_id: course, student_email: "jane@example.com", tags: {course_id: course, student_email: "jane@example.com"})
+    kept = QueryProfileRecorded.new(actor_id: nil, command_handler: "test", encryption_key_id: kept_key_id, course_id: course, student_email: "john@example.com", tags: {course_id: course, student_email: "john@example.com"})
     [erased, kept].each { |event| store.append(event) }
     encryption.destroy_key(key_id)
 

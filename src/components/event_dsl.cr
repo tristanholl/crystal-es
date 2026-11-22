@@ -4,7 +4,7 @@ module ES
       # consumed by `define_event`
     end
 
-    macro tag(name, hashed = false)
+    macro tag(name, type, hashed = false)
       # consumed by `define_event`
     end
 
@@ -25,19 +25,30 @@ module ES
     # passing one to an event that doesn't declare `encrypted: true` is a compile
     # error, not a silent per-instance opt-in.
     #
-    # `tag :attribute` puts the attribute's value on the event as a tag, which is
-    # what a dynamic consistency boundary is queried by. `hashed: true` stores a
-    # keyed digest instead of the value (see `ES::TagHasher`); the default is to
-    # store the value as is. A tag must name an attribute declared in the same
-    # block, and a nil value carries no tag.
+    # `tag :name, Type` declares a tag: a value carried in the event header, which
+    # is what a dynamic consistency boundary is queried by. Tags are independent
+    # of the body. A tag may share its name with an attribute, and the two may
+    # hold the same value or not; a tag can also name something the body does not
+    # carry at all, such as a second aggregate whose consistency the event takes
+    # part in. The generated constructor takes the values as one `tags:` named
+    # tuple, typed by the declarations; a nil value carries no tag.
+    #
+    # `hashed: true` stores a keyed digest instead of the value (see
+    # `ES::TagHasher`); the default is to store the value as is. A hashed tag's
+    # plaintext is stored nowhere unless the body carries it too.
     #
     # ```
     # define_event("course", "student_subscribed") do
     #   attribute :course_id, UUID
-    #   attribute :student_email, String
-    #   tag :course_id
-    #   tag :student_email, hashed: true
+    #   tag :course_id, UUID
+    #   tag :transfer_id, UUID
+    #   tag :student_email, String, hashed: true
     # end
+    #
+    # StudentSubscribed.new(
+    #   actor_id: actor, command_handler: "Subscribe", course_id: course_id,
+    #   tags: {course_id: course_id, transfer_id: transfer_id, student_email: email}
+    # )
     # ```
     macro define_event(event_type, event_handle, encrypted = false, &block)
       @@type = {{ event_type }}
@@ -70,9 +81,9 @@ module ES
 
         tag_definitions = [] of TupleLiteral
         tags.each do |entry|
-          entry.raise "tag takes exactly one attribute name, e.g. `tag :course_id`" if entry.args.size != 1
+          entry.raise "tag takes a name and a type, e.g. `tag :course_id, UUID`" if entry.args.size != 2
           name = entry.args[0]
-          entry.raise "tag expects a symbol naming an attribute, got: #{name}" unless name.is_a?(SymbolLiteral)
+          entry.raise "tag expects a symbol as its name, got: #{name}" unless name.is_a?(SymbolLiteral)
 
           hashed = false
           (entry.named_args || [] of NamedArgument).each do |arg|
@@ -84,10 +95,14 @@ module ES
             end
           end
 
-          entry.raise "tag :#{name.id} does not name an attribute of this event" unless attributes.any? { |attribute| attribute.args[0].id == name.id }
           entry.raise "tag :#{name.id} is declared twice" if tag_definitions.any? { |definition| definition[0] == name.id.stringify }
 
-          tag_definitions << {name.id.stringify, hashed}
+          tag_definitions << {name.id.stringify, hashed, entry.args[1]}
+        end
+
+        unless tags.empty?
+          clash = attributes.find { |attribute| attribute.args[0].id.stringify == "tags" }
+          clash.raise "attribute :tags clashes with the `tags:` constructor argument of an event that declares tags" if clash
         end
       %}
 
@@ -101,16 +116,6 @@ module ES
 
         def self.tag_definitions : Array({String, Bool})
           TAG_DEFINITIONS.dup
-        end
-
-        def tags : Array(ES::Tag)
-          tags = [] of ES::Tag
-          body = @body.as(Body)
-          {% for definition in tag_definitions %}
-            %value = body.{{ definition[0].id }}
-            tags << ES::Tag.new({{ definition[0] }}, %value, {{ definition[1] }}) unless %value.nil?
-          {% end %}
-          tags
         end
       {% end %}
 
@@ -149,6 +154,9 @@ module ES
           {% end %}
 
         {% end %}
+        {% unless tag_definitions.empty? %}
+          tags : NamedTuple({% for definition in tag_definitions %}{{ definition[0].id }}: {{ definition[2] }}, {% end %}),
+        {% end %}
         comment = "",
         aggregate_id = UUID.v7,
         aggregate_version : Int32 = 1,
@@ -168,6 +176,10 @@ module ES
             {{ entry.args[0].id }}: {{ entry.args[0].id }},
           {% end %}
         )
+        {% for definition in tag_definitions %}
+          %value = tags[:{{ definition[0].id }}]
+          @tags << ES::Tag.new({{ definition[0] }}, %value, {{ definition[1] }}) unless %value.nil?
+        {% end %}
       end
     end
   end

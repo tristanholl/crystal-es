@@ -14,7 +14,7 @@ class AppendCourseDefined < ES::Event
   define_event "course", "append_test.course_defined" do
     attribute :course_id, UUID
     attribute :capacity, Int32
-    tag :course_id
+    tag :course_id, UUID
   end
 end
 
@@ -24,8 +24,8 @@ class AppendStudentSubscribed < ES::Event
   define_event "course", "append_test.student_subscribed" do
     attribute :course_id, UUID
     attribute :student_id, UUID
-    tag :course_id
-    tag :student_id
+    tag :course_id, UUID
+    tag :student_id, UUID
   end
 end
 
@@ -34,20 +34,20 @@ class AppendAccountRegistered < ES::Event
 
   define_event "account", "append_test.account_registered" do
     attribute :student_email, String
-    tag :student_email, hashed: true
+    tag :student_email, String, hashed: true
   end
 end
 
 private def defined(course_id : UUID, capacity = 1)
-  AppendCourseDefined.new(actor_id: nil, command_handler: "test", course_id: course_id, capacity: capacity)
+  AppendCourseDefined.new(actor_id: nil, command_handler: "test", course_id: course_id, capacity: capacity, tags: {course_id: course_id})
 end
 
 private def joined(course_id : UUID, student_id = UUID.v7)
-  AppendStudentSubscribed.new(actor_id: nil, command_handler: "test", course_id: course_id, student_id: student_id)
+  AppendStudentSubscribed.new(actor_id: nil, command_handler: "test", course_id: course_id, student_id: student_id, tags: {course_id: course_id, student_id: student_id})
 end
 
 private def registered(email : String)
-  AppendAccountRegistered.new(actor_id: nil, command_handler: "test", student_email: email)
+  AppendAccountRegistered.new(actor_id: nil, command_handler: "test", student_email: email, tags: {student_email: email})
 end
 
 private def course_query(course_id : UUID) : ES::Query

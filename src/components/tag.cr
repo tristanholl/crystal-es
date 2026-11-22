@@ -3,8 +3,9 @@ module ES
   #
   # Tags are what a dynamic consistency boundary is drawn around: a query selects
   # every event carrying a given set of tags, rather than one aggregate's stream.
-  # An event declares its tags with `tag` inside `define_event`; each one takes its
-  # value from a body attribute.
+  # An event declares its tags with `tag :name, Type` inside `define_event` and
+  # takes their values through the constructor's `tags:` argument, independently
+  # of its body. Values are stored in their `to_s` form.
   #
   # A tag is stored in the event header as `<key>:<value>`, or — when declared
   # `hashed: true` — as `<key>:<hmac>`, keyed by `ES::TagHasher`. The plaintext value

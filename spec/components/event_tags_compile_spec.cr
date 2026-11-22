@@ -42,25 +42,43 @@ end
 
 describe "ES::EventDSL tag compile-time checks" do
   it "accepts valid declarations without a warning (control)" do
-    ok, output = compile_events(event_with("tag :course_id\ntag :email, hashed: true"))
+    ok, output = compile_events(
+      event_with("tag :course_id, UUID\ntag :email, String, hashed: true\ntag :other_id, UUID?") +
+      %(\nTagCheckEvent.new(actor_id: nil, command_handler: "x", course_id: UUID.v7, email: "e", tags: {course_id: UUID.v7, email: "e", other_id: nil}))
+    )
     fail output unless ok
     output.should_not contain("Warning")
   end
 
   {
-    %(tag :unknown)              => "does not name an attribute of this event",
-    %(tag :email\ntag :email)    => "is declared twice",
-    %(tag :email, hashed: "yes") => "expects `hashed:` to be true or false",
-    %(tag :email, hashd: true)   => "unknown option 'hashd'",
-    %(tag "email")               => "expects a symbol naming an attribute",
-    %(tag :email, :course_id)    => "takes exactly one attribute name",
-    %(something_else :email)     => "only accepts `attribute` and `tag` declarations",
+    %(tag :email)                                  => "takes a name and a type",
+    %(tag :email, String\ntag :email, String)      => "is declared twice",
+    %(tag :email, String, hashed: "yes")           => "expects `hashed:` to be true or false",
+    %(tag :email, String, hashd: true)             => "unknown option 'hashd'",
+    %(tag "email", String)                         => "expects a symbol as its name",
+    %(tag :email, String, UUID)                    => "takes a name and a type",
+    %(attribute :tags, String\ntag :email, String) => "attribute :tags clashes",
+    %(something_else :email)                       => "only accepts `attribute` and `tag` declarations",
   }.each do |declaration, message|
     it "rejects `#{declaration.gsub('\n', "; ")}`" do
       ok, output = compile_events(event_with(declaration))
       ok.should be_false
       output.should contain(message)
     end
+  end
+
+  it "refuses a tags argument that does not match the declarations" do
+    ok, output = compile_events(event_with("tag :course_id, UUID") + %(\nTagCheckEvent.new(actor_id: nil, command_handler: "x", course_id: UUID.v7, email: "e", tags: {course_id: "not a uuid"})))
+
+    ok.should be_false
+    output.should contain("tags")
+  end
+
+  it "refuses a tags argument on an event without tags" do
+    ok, output = compile_events(event_with("") + %(\nTagCheckEvent.new(actor_id: nil, command_handler: "x", course_id: UUID.v7, email: "e", tags: {course_id: UUID.v7})))
+
+    ok.should be_false
+    output.should contain("tags")
   end
 
   it "refuses to append an array of something other than events" do
@@ -72,8 +90,8 @@ describe "ES::EventDSL tag compile-time checks" do
 
   it "warns when a key is hashed in one event but not in another" do
     ok, output = compile_events(
-      event_with("tag :email, hashed: true", "HashedEmailEvent", "hashed_email") + "\n" +
-      event_with("tag :email", "PlainEmailEvent", "plain_email")
+      event_with("tag :email, String, hashed: true", "HashedEmailEvent", "hashed_email") + "\n" +
+      event_with("tag :email, String", "PlainEmailEvent", "plain_email")
     )
 
     fail output unless ok
@@ -82,9 +100,9 @@ describe "ES::EventDSL tag compile-time checks" do
 
   it "does not warn when every event declares a key the same way" do
     ok, output = compile_events(
-      event_with("tag :email, hashed: true\ntag :course_id", "FirstEvent", "first") + "\n" +
-      event_with("tag :email, hashed: true", "SecondEvent", "second") + "\n" +
-      event_with("tag :course_id, hashed: false", "ThirdEvent", "third")
+      event_with("tag :email, String, hashed: true\ntag :course_id, UUID", "FirstEvent", "first") + "\n" +
+      event_with("tag :email, String, hashed: true", "SecondEvent", "second") + "\n" +
+      event_with("tag :course_id, UUID, hashed: false", "ThirdEvent", "third")
     )
 
     fail output unless ok

@@ -81,7 +81,7 @@ module ES
       raise ES::Exception::InvalidState.new("Nothing to append: the batch is empty") if events.empty?
 
       events.map do |event|
-        EncodedEvent.new(event, encode_header(event), encode_body(event), event.header.event_handle, event.tags.map { |tag| encode_tag(tag) })
+        EncodedEvent.new(event, encode_header(event), encode_body(event), event.header.event_handle, stored_tags(event))
       end
     end
 
@@ -142,12 +142,47 @@ module ES
     # The tags are derived here rather than when the event is built, because a
     # hashed tag needs the store's hasher. That also means the plaintext value of
     # a hashed tag never sits on a header that could be serialized elsewhere.
+    #
+    # An event without plaintext tags keeps the header's stored tags as they are,
+    # which is what an event read back and appended again carries.
     protected def encode_header(event : ES::Event) : String
-      tags = event.tags
-      return event.header.to_json if tags.empty? && event.header.tags.empty?
+      return event.header.to_json if event.tags.empty?
 
-      event.header.with_tags(tags.map { |tag| encode_tag(tag) }).to_json
+      event.header.with_tags(stored_tags(event)).to_json
     end
+
+    # The tags an event is stored with — the ones `encode_header` writes, and the
+    # ones the Postgres store locks. Deriving both here keeps them from drifting
+    # apart: a tag stored but not locked would slip past conditional appends.
+    #
+    # An event built through `define_event` brings plaintext tags, encoded here.
+    # One read back brings stored tags in its header instead, kept as they are —
+    # but only once checked, since a header can also come from elsewhere (a
+    # queue message, a copy tool): every key must be declared by the event, and
+    # a hashed key must carry a digest. Otherwise a plaintext value would be
+    # stored under a key declared hashed, or an event slipped into a boundary it
+    # does not belong to.
+    protected def stored_tags(event : ES::Event) : Array(String)
+      plain = event.tags
+      stored = event.header.tags
+
+      # Messages name keys only, never values, which may be personal data
+      raise ES::Exception::InvalidState.new("'#{event.class.name}' carries both tags to encode and stored tags; build it with one or the other") if !plain.empty? && !stored.empty?
+      return plain.map { |tag| encode_tag(tag) } unless plain.empty?
+
+      declared = event.class.tag_definitions.to_h
+      stored.each do |tag|
+        key, _, value = tag.partition(':')
+        hashed = declared[key]?
+        raise ES::Exception::InvalidState.new("'#{event.class.name}' carries a stored tag '#{key}' it does not declare") if hashed.nil?
+        raise ES::Exception::InvalidState.new("'#{event.class.name}' carries a stored tag '#{key}' that is declared hashed but holds no digest") if hashed && !value.matches?(STORED_DIGEST)
+      end
+
+      stored
+    end
+
+    # What `ES::TagHasher` stores for a hashed tag's value
+    private STORED_DIGEST = /\A[0-9a-f]{#{ES::TagHasher::DIGEST_SIZE * 2}}\z/
 
     # Returns the stored form of one tag
     protected def encode_tag(tag : ES::Tag) : String

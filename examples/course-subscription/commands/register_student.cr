@@ -17,7 +17,8 @@ class RegisterStudentHandler < ES::CommandHandler(RegisterStudent)
         actor_id: nil, command_handler: "RegisterStudent",
         encryption_key_id: ES::Config.encryption.create_key,
         aggregate_id: command.aggregate_id,
-        student_id: command.aggregate_id, email: command.email
+        student_id: command.aggregate_id, email: command.email,
+        tags: {student_id: command.aggregate_id, email: command.email}
       )],
       ES::AppendCondition.new(query)
     )

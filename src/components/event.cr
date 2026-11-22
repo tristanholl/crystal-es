@@ -42,7 +42,6 @@ module ES
         @command_handler = "undefined",
         @command_handler_version = ES::Config.version,
         @encryption_key_id : UUID? = nil,
-        @tags : Array(String) = [] of String,
       )
       end
 
@@ -91,10 +90,16 @@ module ES
       false
     end
 
-    # The tags of this event, in plaintext. `define_event` generates this from its
-    # `tag` declarations; an event without any has none.
+    # Tags given when the event was built, in plaintext, until the event store
+    # encodes them into the header on append
+    @tags : Array(ES::Tag) = [] of ES::Tag
+
+    # The tags this event was built with, in plaintext — `define_event` takes
+    # them as the constructor's `tags:` argument. A stored event read back has
+    # none here: its tags exist only in stored form, in `header.tags`, and a
+    # hashed one only as its digest.
     def tags : Array(ES::Tag)
-      [] of ES::Tag
+      @tags
     end
 
     # The declared tags of this event class as `{key, hashed}` pairs

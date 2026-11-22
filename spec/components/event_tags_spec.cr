@@ -6,10 +6,9 @@ class TaggedTestEvent < ES::Event
   define_event "course", "test.student_subscribed" do
     attribute :course_id, UUID
     attribute :student_email, String
-    attribute :referrer, String?, nil
-    tag :course_id
-    tag :student_email, hashed: true
-    tag :referrer
+    tag :course_id, UUID
+    tag :student_email, String, hashed: true
+    tag :referrer, String?
   end
 end
 
@@ -18,12 +17,35 @@ class PlainTaggedTestEvent < ES::Event
 
   define_event "course", "test.course_opened" do
     attribute :course_id, UUID
-    tag :course_id, hashed: false
+    tag :course_id, UUID, hashed: false
+  end
+end
+
+# A tag that names nothing in the body, and one sharing a name with an
+# attribute while holding a different value
+class IndependentTagsTestEvent < ES::Event
+  include ::ES::EventDSL
+
+  define_event "transfer", "test.funds_reserved" do
+    attribute :account_id, UUID
+    tag :account_id, UUID
+    tag :transfer_id, UUID
+  end
+end
+
+# An event bringing tags to encode on top of stored ones, which no generated
+# constructor produces
+class BothTagsTestEvent < TaggedTestEvent
+  def tags : Array(ES::Tag)
+    [ES::Tag.new(:course_id, "y")]
   end
 end
 
 private def tagged_event(course_id = UUID.v7, email = "jane@example.com", referrer : String? = nil)
-  TaggedTestEvent.new(actor_id: nil, command_handler: "test", course_id: course_id, student_email: email, referrer: referrer)
+  TaggedTestEvent.new(
+    actor_id: nil, command_handler: "test", course_id: course_id, student_email: email,
+    tags: {course_id: course_id, student_email: email, referrer: referrer}
+  )
 end
 
 describe ES::Tag do
@@ -138,13 +160,25 @@ describe "ES::EventDSL tags" do
     DummyEvent.new.tags.should be_empty
   end
 
-  it "takes tag values from the body" do
+  it "takes tag values from the tags argument" do
     course_id = UUID.v7
     tags = tagged_event(course_id, referrer: "newsletter").tags
 
     tags.map(&.key).should eq(["course_id", "student_email", "referrer"])
     tags.map(&.value).should eq([course_id.to_s, "jane@example.com", "newsletter"])
     tags.map(&.hashed?).should eq([false, true, false])
+  end
+
+  it "keeps tags independent of the body" do
+    account, other_account, transfer = UUID.v7, UUID.v7, UUID.v7
+    event = IndependentTagsTestEvent.new(
+      actor_id: nil, command_handler: "test", account_id: account,
+      tags: {account_id: other_account, transfer_id: transfer}
+    )
+
+    event.body.as(IndependentTagsTestEvent::Body).account_id.should eq(account)
+    event.tags.map(&.value).should eq([other_account.to_s, transfer.to_s])
+    event.body.to_json.should_not contain(transfer.to_s)
   end
 
   it "carries no tag for a nil value" do
@@ -187,7 +221,7 @@ describe "Event store tag encoding" do
   it "stores unhashed tags without a tag hasher" do
     store = ES::EventStoreAdapters::InMemory.new(tag_hasher: nil)
     course_id = UUID.v7
-    event = PlainTaggedTestEvent.new(actor_id: nil, command_handler: "test", course_id: course_id)
+    event = PlainTaggedTestEvent.new(actor_id: nil, command_handler: "test", course_id: course_id, tags: {course_id: course_id})
 
     store.append(event)
 
@@ -233,6 +267,44 @@ describe "Event store tag encoding" do
     entry.header.tags.should eq(ES::Event::Header.from_json(store.fetch_event(event.header.event_id).header.to_json).tags)
     entry.header.tags.size.should eq(2)
     entry.header.to_json.should_not contain("jane")
+  end
+
+  it "keeps the stored tags of an event read back and appended again" do
+    hasher = ES::TagHasher.new(test_application_key)
+    source = ES::EventStoreAdapters::InMemory.new(tag_hasher: hasher)
+    event = tagged_event
+    source.append(event)
+    stored = source.fetch_event(event.header.event_id)
+    read_back = TaggedTestEvent.new(ES::Event::Header.from_json(stored.header.to_json), stored.body)
+
+    target = ES::EventStoreAdapters::InMemory.new(tag_hasher: nil)
+    target.append(read_back)
+
+    target.fetch_event(event.header.event_id).header["tags"].should eq(stored.header["tags"])
+  end
+
+  it "refuses a stored tag the event does not declare, or plaintext under a hashed key" do
+    store = ES::EventStoreAdapters::InMemory.new(tag_hasher: ES::TagHasher.new(test_application_key))
+    body = JSON.parse(%({"comment": "", "course_id": "#{UUID.v7}", "student_email": "jane@example.com"}))
+    forged = ->(tags : Array(String)) do
+      header = JSON.parse(ES::Event::Header.new(actor_id: nil, aggregate_id: UUID.v7, aggregate_version: 1, event_handle: "test.student_subscribed").to_json).as_h
+      header["tags"] = JSON::Any.new(tags.map { |tag| JSON::Any.new(tag) })
+      TaggedTestEvent.new(ES::Event::Header.from_json(header.to_json), body)
+    end
+
+    error = expect_raises(ES::Exception::InvalidState, /declared hashed but holds no digest/) { store.append(forged.call(["student_email:jane@example.com"])) }
+    error.message.to_s.should_not contain("jane")
+    expect_raises(ES::Exception::InvalidState, /does not declare/) { store.append(forged.call(["victim_course:#{UUID.v7}"])) }
+    expect_raises(ES::Exception::InvalidState, /does not declare/) { store.append(DummyEvent.new(ES::Event::Header.from_json(forged.call(["course_id:x"]).header.to_json), JSON.parse(%({"comment": ""})))) }
+    store.read(ES::Query.all).should be_empty
+  end
+
+  it "refuses an event carrying both tags to encode and stored tags" do
+    store = ES::EventStoreAdapters::InMemory.new(tag_hasher: ES::TagHasher.new(test_application_key))
+    source = tagged_event
+    event = BothTagsTestEvent.new(source.header.with_tags(["course_id:x"]), JSON.parse(source.body.to_json))
+
+    expect_raises(ES::Exception::InvalidState, /both tags to encode and stored tags/) { store.append(event) }
   end
 
   it "reads a header written before tags existed" do

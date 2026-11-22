@@ -44,7 +44,10 @@ class SubscribeStudentHandler < ES::CommandHandler(SubscribeStudent)
     raise ES::Exception::InvalidState.new("Student takes too many courses") if student_subscriptions >= MAX_COURSES_PER_STUDENT
 
     @event_store.append(
-      [Events::StudentSubscribed.new(actor_id: nil, command_handler: "SubscribeStudent", course_id: course_id, student_id: student_id)],
+      [Events::StudentSubscribed.new(
+        actor_id: nil, command_handler: "SubscribeStudent", course_id: course_id, student_id: student_id,
+        tags: {course_id: course_id, student_id: student_id}
+      )],
       ES::AppendCondition.new(query, after: events.last?.try(&.position))
     )
   end

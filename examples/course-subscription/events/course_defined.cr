@@ -5,7 +5,7 @@ module Events
     define_event "course", "course_defined" do
       attribute :course_id, UUID
       attribute :capacity, Int32
-      tag :course_id
+      tag :course_id, UUID
     end
   end
 end

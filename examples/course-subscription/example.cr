@@ -71,7 +71,7 @@ puts "Tags as stored for alice: #{registration.header["tags"]}"
 # --- Capacity and per-student limit under concurrency ----------------------------
 
 course = UUID.v7
-store.append(Events::CourseDefined.new(actor_id: nil, command_handler: "DefineCourse", course_id: course, capacity: 2))
+store.append(Events::CourseDefined.new(actor_id: nil, command_handler: "DefineCourse", course_id: course, capacity: 2, tags: {course_id: course}))
 
 # Three students try to take the last two seats at the same moment
 outcomes = Channel(String).new
@@ -87,7 +87,7 @@ puts "Concurrent subscriptions to a course with 2 seats: #{Array.new(3) { outcom
 
 # The student limit spans courses: alice may take two, not three
 courses = Array.new(2) { UUID.v7 }
-courses.each { |id| store.append(Events::CourseDefined.new(actor_id: nil, command_handler: "DefineCourse", course_id: id, capacity: 10)) }
+courses.each { |id| store.append(Events::CourseDefined.new(actor_id: nil, command_handler: "DefineCourse", course_id: id, capacity: 10, tags: {course_id: id})) }
 courses.each do |id|
   SubscribeStudentHandler.new.handle(SubscribeStudent.new(id, alice))
   puts "alice subscribed to another course"

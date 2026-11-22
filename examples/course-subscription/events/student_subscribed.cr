@@ -7,8 +7,8 @@ module Events
     define_event "course", "student_subscribed" do
       attribute :course_id, UUID
       attribute :student_id, UUID
-      tag :course_id
-      tag :student_id
+      tag :course_id, UUID
+      tag :student_id, UUID
     end
   end
 end
