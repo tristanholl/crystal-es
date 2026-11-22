@@ -19,6 +19,22 @@ module ES
       getter event_id : UUID = UUID.v7
       getter event_version : String = "1.0.0"
 
+      # Tags in their stored form — `<key>:<value>`, or `<key>:<hmac>` for a
+      # hashed tag. Empty on an event that has not been stored yet: the event
+      # store derives them from `ES::Event#tags` on append, because only the store
+      # holds the key a hashed tag needs. Headers written before tags existed carry
+      # no field and read back as empty, and an untagged header is written without
+      # one, so its JSON is unchanged from before tags existed.
+      @[JSON::Field(ignore_serialize: tags.empty?)]
+      getter tags : Array(String) = [] of String
+
+      # The version of each stored tag this event raised it to — the number of
+      # events carrying that tag up to and including this one. Assigned by the
+      # event store on append, never taken from the event as given, and empty on
+      # an untagged event. What `ES::AppendCondition` compares against.
+      @[JSON::Field(ignore_serialize: tag_versions.empty?)]
+      getter tag_versions : Hash(String, Int64) = {} of String => Int64
+
       # Default constructor
       def initialize; end
 
@@ -34,6 +50,23 @@ module ES
         @command_handler_version = ES::Config.version,
         @encryption_key_id : UUID? = nil,
       )
+      end
+
+      # Returns a copy of this header carrying the given stored tags
+      def with_tags(tags : Array(String), versions : Hash(String, Int64) = {} of String => Int64) : Header
+        copy = dup
+        copy.tags = tags
+        copy.tag_versions = versions
+        copy
+      end
+
+      # See `tags=`
+      protected def tag_versions=(@tag_versions : Hash(String, Int64))
+      end
+
+      # A method rather than `setter tags : Array(String)`: re-declaring the typed
+      # instance variable would drop the JSON::Field annotation on `tags`.
+      protected def tags=(@tags : Array(String))
       end
     end
 
@@ -67,6 +100,67 @@ module ES
     # so passing one there is a compile error rather than a per-instance opt-in.
     def self.encrypted? : Bool
       false
+    end
+
+    # Tags given when the event was built, in plaintext, until the event store
+    # encodes them into the header on append
+    @tags : Array(ES::Tag) = [] of ES::Tag
+
+    # The tags this event was built with, in plaintext — `define_event` takes
+    # them as the constructor's `tags:` argument. A stored event read back has
+    # none here: its tags exist only in stored form, in `header.tags`, and a
+    # hashed one only as its digest.
+    def tags : Array(ES::Tag)
+      @tags
+    end
+
+    # The declared tags of this event class as `{key, hashed}` pairs
+    def self.tag_definitions : Array({String, Bool})
+      [] of {String, Bool}
+    end
+
+    # A query hashes a tag value according to how the key is declared, so a key
+    # hashed by one event and stored in the clear by another would make queries
+    # miss events. Keeping the two consistent is the application's job; this
+    # only warns at compile time when they diverge, comparing every event class
+    # `define_event` generated, whether it is registered or not.
+    #
+    # The same pass generates `tag_key_hashed?`, which is how a query decides
+    # whether to hash a value — a key declared hashed by any event is hashed —
+    # and `tag_key_declared?`, which append conditions check their keys against.
+    macro finished
+      {% seen = {} of StringLiteral => ASTNode %}
+      {% hashed_keys = [] of StringLiteral %}
+      {% for klass in ES::Event.all_subclasses.sort_by(&.name) %}
+        {% if klass.has_constant?("TAG_DEFINITIONS") %}
+          {% for definition in klass.constant("TAG_DEFINITIONS") %}
+            {% previous = seen[definition[0]] %}
+            {% if previous && previous[1] != definition[1] %}
+              {% warning "Tag '#{definition[0].id}' is declared hashed: #{previous[1]} in #{previous[2]} but hashed: #{definition[1]} in #{klass}. Queries hash a tag by its declaration, so one of the two will not be found." %}
+            {% end %}
+            {% seen[definition[0]] = {definition[0], definition[1], klass} unless previous %}
+            {% hashed_keys << definition[0] if definition[1] && !hashed_keys.includes?(definition[0]) %}
+          {% end %}
+        {% end %}
+      {% end %}
+
+      # Whether any event declares the tag key
+      def self.tag_key_declared?(key : String) : Bool
+        {% if seen.empty? %}
+          false
+        {% else %}
+          {{ seen.keys }}.includes?(key)
+        {% end %}
+      end
+
+      # Whether any event declares the tag key `hashed: true`
+      def self.tag_key_hashed?(key : String) : Bool
+        {% if hashed_keys.empty? %}
+          false
+        {% else %}
+          {{ hashed_keys }}.includes?(key)
+        {% end %}
+      end
     end
 
     def initialize

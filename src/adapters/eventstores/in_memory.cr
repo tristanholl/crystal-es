@@ -3,10 +3,22 @@ module ES
     class InMemory < ES::EventStore
       @events : Hash(UUID, ES::EventStore::Event) = Hash(UUID, ES::EventStore::Event).new
 
-      # Initialize with an optional queue adapter and payload encryption
+      # Global position of each event, in append order, starting at 1
+      @positions : Hash(UUID, Int64) = Hash(UUID, Int64).new
+      @position : Int64 = 0_i64
+
+      # Current version of every stored tag
+      @tag_versions : Hash(String, Int64) = Hash(String, Int64).new
+
+      # Makes an append's check, version assignment and insert one step, and
+      # keeps reads from iterating while an append changes the store
+      @mutex = Mutex.new
+
+      # Initialize with an optional queue adapter, payload encryption and tag hashing
       def initialize(
         @queue : ES::QueueAdapters::InMemory? = nil,
         @encryption : ES::EncryptionKeyManager? = ES::Config.encryption?,
+        @tag_hasher : ES::TagHasher? = ES::Config.tag_hasher?,
       )
       end
 
@@ -15,12 +27,50 @@ module ES
         # Noop
       end
 
-      # Appends an event to the event stream
+      # Appends an event to the event stream and returns its position
       def append(event : ES::Event)
-        @events[event.header.event_id] = ES::EventStore::Event.new(JSON.parse(event.header.to_json), JSON.parse(encode_body(event)))
+        append_batch([event.as(ES::Event)], nil)
+      end
 
-        q = @queue
-        q.append(event) unless q.nil?
+      # Appends a batch atomically, failing with `ES::Exception::Conflict` if a
+      # tag the condition names is no longer at the expected version
+      protected def append_batch(events : Array(ES::Event), condition : ES::AppendCondition?) : Int64
+        encoded = encode_events(events)
+        expected = condition.try { |cond| expected_versions(cond) } || {} of String => Int64
+
+        @mutex.synchronize do
+          # The Postgres store refuses a repeated event id through its unique
+          # index; overwriting the stored event here would hide the same mistake.
+          event_ids = encoded.map(&.event.header.event_id)
+          if event_ids.uniq.size != event_ids.size || event_ids.any? { |event_id| @events.has_key?(event_id) }
+            raise ES::Exception::Conflict.new("An event id in the batch is already stored or repeated", status_code: HTTP::Status::CONFLICT)
+          end
+
+          if mismatch = version_mismatch(expected, @tag_versions)
+            raise append_conflict(mismatch)
+          end
+
+          # Assigned on a copy, so a failure below leaves the versions untouched
+          current = @tag_versions.dup
+          versions = assign_versions(encoded, current)
+          stored_events = encoded.map_with_index do |event, index|
+            ES::EventStore::Event.new(JSON.parse(stored_header(event, versions[index])), JSON.parse(event.body))
+          end
+          @tag_versions = current
+
+          encoded.each_with_index do |event, index|
+            event_id = event.event.header.event_id
+            stored = stored_events[index]
+            @position += 1
+            @events[event_id] = stored
+            @positions[event_id] = @position
+
+            q = @queue
+            q.append(stored.header) unless q.nil?
+          end
+
+          @position
+        end
       end
 
       # Returns a single event for a given id
@@ -37,7 +87,7 @@ module ES
           raise ES::Exception::NotFound.new("Event '#{uid}' not found in eventstore") unless @events.has_key?(uid)
         end
 
-        @events.each do |event_id, event|
+        snapshot.each do |event_id, event, _|
           if es_event = decode_or_skip(event.header, event.body)
             block.call(es_event)
           end
@@ -67,11 +117,62 @@ module ES
         key_ids
       end
 
+      # Returns the events matching a query, in append order
+      def read(query : ES::Query, after : Int64? = nil, limit : Int32? = nil) : Array(ES::EventStore::Event)
+        validate_read_options(after, limit)
+        items = encode_query(query)
+        result = Array(ES::EventStore::Event).new
+
+        snapshot.each do |_, event, position|
+          break if limit && result.size >= limit
+
+          next if after && position <= after
+          next unless matches?(event.header, items)
+
+          result << decode_or_erase(event.header, event.body, position)
+        end
+
+        result
+      end
+
+      # Returns the events matching a query and the current versions of its tags,
+      # both as of one moment
+      def read_for_decision(query : ES::Query) : ES::Decision
+        items = encode_query(query)
+        tags = decision_tags(items)
+
+        events, versions = @mutex.synchronize do
+          {
+            @events.compact_map { |event_id, event| {event_id, event} if matches?(event.header, items) }
+              .map { |event_id, event| {event, @positions[event_id]} },
+            tags.to_h { |tag| {tag, @tag_versions.fetch(tag, 0_i64)} },
+          }
+        end
+
+        ES::Decision.new(events.map { |event, position| decode_or_erase(event.header, event.body, position) }, versions)
+      end
+
+      # The stored events with their positions as of now, so iterating them never
+      # races an append and a caller's block may append without deadlocking
+      private def snapshot : Array({UUID, ES::EventStore::Event, Int64})
+        @mutex.synchronize { @events.map { |event_id, event| {event_id, event, @positions[event_id]} } }
+      end
+
+      # Whether a stored header matches any item of an encoded query
+      private def matches?(header : JSON::Any, items : Array(EncodedQueryItem)) : Bool
+        handle = header["event_handle"].as_s
+        tags = header["tags"]?.try(&.as_a.map(&.as_s)) || [] of String
+
+        items.any? do |item|
+          (item.types.empty? || item.types.includes?(handle)) && item.tags.all? { |tag| tags.includes?(tag) }
+        end
+      end
+
       # Returns the stream of events for a given aggregate
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new
 
-        @events.each_value do |event|
+        snapshot.each do |_, event, _|
           event_header = JSON.parse(event.header.to_json)
           event_body = JSON.parse(event.body.to_json)
 

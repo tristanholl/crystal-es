@@ -40,5 +40,29 @@ module ES
 
       ES::PayloadCipher.open(@key, ES::PayloadCipher.unpack(wrapped))
     end
+
+    # Prefix of every label `derive_key` derives under
+    DERIVATION_PREFIX = "crystal-es:derive:"
+
+    # Derives an independent key for another purpose, such as `ES::TagHasher`, so
+    # the application still manages exactly one secret.
+    #
+    # Every label is prefixed with `DERIVATION_PREFIX`, which none of the labels
+    # `ES::PayloadCipher` derives its key-wrapping subkeys under starts with. No
+    # label passed here can therefore yield a key that wraps data encryption keys,
+    # and that stays true if the cipher gains another subkey.
+    def derive_key(label : String) : Bytes
+      OpenSSL::HMAC.digest(OpenSSL::Algorithm::SHA256, @key, DERIVATION_PREFIX + label)
+    end
+
+    # Keeps the key out of logs and error reports
+    def inspect(io : IO) : Nil
+      io << "#<" << self.class.name << " key_id=" << @key_id << ">"
+    end
+
+    # :ditto:
+    def to_s(io : IO) : Nil
+      inspect(io)
+    end
   end
 end

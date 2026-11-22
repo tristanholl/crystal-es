@@ -30,6 +30,22 @@ module ES
       @@encryption
     end
 
+    def tag_hasher=(param : ES::TagHasher)
+      @@tag_hasher = param
+    end
+
+    def tag_hasher : ES::TagHasher
+      t = @@tag_hasher
+      raise "No tag hasher registered" if t.nil?
+      t
+    end
+
+    # Hashing tags is optional, like encryption: unhashed tags need nothing
+    # configured, so the event stores ask for the hasher this way.
+    def tag_hasher? : ES::TagHasher?
+      @@tag_hasher
+    end
+
     def event_handlers=(param : ES::EventHandlers)
       @@event_handlers = param
     end

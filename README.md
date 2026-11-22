@@ -28,9 +28,12 @@ The library provides:
 - **Events** — immutable facts with a type-safe DSL
 - **Projections** — read models built from event streams, with a schema DSL and schema drift detection
 - **Event Bus** — fan-out published events to reactors and projections
+- **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that none of the tags a decision depended on moved (see [Tags](#tags), [Querying by tag](#querying-by-tag) and [Tag versions and conditional appends](#tag-versions-and-conditional-appends))
 - **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
 
-A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction).
+A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction). [`./examples/course-subscription`](./examples/course-subscription) shows dynamic consistency boundaries: course capacity and a per-student limit enforced together, unique hashed emails, and erasure.
+
+See the [changelog](./CHANGELOG.md) for upgrade notes between versions.
 
 ---
 
@@ -68,6 +71,57 @@ end
 ```
 
 `attribute(name, type, default?)` — declare a typed field on the event body. A default value makes the field optional at construction time.
+
+#### Tags
+
+`tag(name, type, hashed: false)` — declare a tag: a value carried in the event header. Tags are the groundwork for dynamic consistency boundaries: instead of one aggregate's stream, a consistency boundary becomes "every event carrying these tags".
+
+Tags and attributes are independent of each other. A tag may share its name with an attribute, and may hold the same value or a different one. It can also name something the body doesn't carry at all, such as a second aggregate whose consistency the event takes part in, without coupling it into the payload.
+
+```crystal
+define_event("course", "student_subscribed") do
+  attribute :course_id, UUID
+  attribute :student_id, UUID
+  tag :course_id, UUID                 # stored as "course_id:<uuid>"
+  tag :student_id, UUID
+end
+
+define_event("student", "student_registered") do
+  attribute :student_id, UUID
+  tag :student_id, UUID
+  tag :email, String, hashed: true     # stored as "email:<hmac>", the value nowhere else
+end
+
+StudentSubscribed.new(
+  actor_id: actor, command_handler: "Subscribe",
+  course_id: course_id, student_id: student_id,
+  tags: {course_id: course_id, student_id: student_id}
+)
+```
+
+- The constructor takes the tag values as one `tags:` named tuple, whose keys and types the compiler checks against the declarations. Every declared tag must be present. One declared with a nilable type, such as `UUID?`, may be `nil`, and then the event carries no such tag. An event without tags has no `tags:` argument.
+- Values are stored in their `to_s` form, so a query matches when it passes a value with the same `to_s`. In practice, use the same type.
+- The event store writes tags to the event header (`header.tags`) on append, in their stored form, together with their versions (`header.tag_versions`, see [Tag versions](#tag-versions-and-conditional-appends)). `event.tags` holds the plaintext values the event was built with. An event read back only has the stored form, and a hashed tag only its digest. Put a value in an attribute too if code needs it after reading the event back. Appending a read-back event again keeps its stored tags exactly as they are, without hashing them again. A store with a different application key, or with no tag hasher, won't find its hashed tags. Stored tags are checked before they are kept, because a header can also come from elsewhere, such as a queue message. Every key must be declared by the event class, and a hashed key must hold a digest. Otherwise the append raises `ES::Exception::InvalidState`.
+- A tag without a type, a duplicate tag, an unknown option, a non-boolean `hashed:`, or an attribute named `tags` next to declared tags is a compile error.
+- If the same tag key is `hashed: true` in one event and `hashed: false` in another, compilation emits a warning. Keeping a key consistent across events is the application's job: a query hashes a tag value according to how the key is declared, so the inconsistent events would not be found.
+
+**Hashed tags.** `hashed: true` stores an HMAC-SHA256 of the value (truncated to 128 bits), keyed by a key derived from the application encryption key. It is off by default and has to be switched on:
+
+```crystal
+ES::Config.tag_hasher = ES::TagHasher.new(application_key) # ES::ApplicationEncryptionKeyManager
+```
+
+Unhashed tags need no configuration. Appending an event with a hashed tag while no hasher is configured raises `ES::Exception::InvalidState`, rather than storing the value in the clear. Event stores read `ES::Config.tag_hasher` when they are constructed, so configure it before building them, or pass `tag_hasher:` to the store directly.
+
+What hashing does and does not protect:
+
+- A database dump alone does not reveal hashed values. A plain hash would: email addresses and names fall to a dictionary attack within seconds, which is why the digest is keyed.
+- The same value always yields the same digest, which is what lets a query find it. Whoever holds the application key can therefore still test whether a known value appears in the store. A hashed tag is pseudonymous data, not anonymous data.
+- Tags are not crypto-shredded. Destroying an event's encryption key erases its body, but not its tags. A tag holding personal data outlives the erasure. An unhashed tag on an `encrypted: true` event stores its value in the clear in the header, even if the body holds the same value encrypted.
+- Hashing only keeps a value out of the header. If the body carries the same value as an attribute of an event without `encrypted: true`, the value is still stored in the clear there. A hashed tag whose value lives in no attribute (and not in the free-text `comment`) is stored only as its digest.
+- The derived key cannot be rotated: every stored digest depends on it, the same way every wrapped data key depends on the application key.
+
+Prefer tagging by a surrogate id (a UUID) over personal data. Use `hashed: true` where that isn't possible.
 
 ---
 
@@ -285,6 +339,86 @@ bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 - **`ES::Adapters::EventStores::Postgres`** — stores events as JSONB rows with unique `(aggregate_id, version)` constraints. Provides a flattened view for stream queries and cursor-based pagination for batch replay.
 - **`ES::Adapters::EventStores::InMemory`** — lightweight implementation for tests.
 
+#### Querying by tag
+
+`read(query, after: nil, limit: nil)` returns events selected by type and [tag](#tags) rather than by aggregate:
+
+```crystal
+query = ES::Query.new(
+  ES::QueryItem.new(CourseDefined, CourseCapacityChanged, tags: {course_id: course_id}),
+  ES::QueryItem.new(StudentSubscribed, tags: {course_id: course_id}),
+)
+
+events = event_store.read(query)
+events.last.position # => position of the last matching event
+```
+
+- An event matches an item when it is of one of the item's types and carries **all** of its tags. An event matches the query when it matches **any** item.
+- An item without types matches every type (`ES::QueryItem.new(tags: {...})`). An item without tags matches regardless of tags. `ES::Query.all` matches every event.
+- Tag values are given in plaintext. A value is hashed before matching when its key is declared `hashed: true` on an event, so a query never repeats that decision. A query for a hashed tag needs the tag hasher, like an append.
+- Events come back in append order, each with its `position` in the store. Positions only increase but are not gapless. `after:` returns only events past a position, `limit:` caps how many are returned.
+- Positions order events and page through results. They play no part in consistency, which rests on [tag versions](#tag-versions-and-conditional-appends). They are not commit-ordered: concurrent appends can commit in the opposite order of their positions. So don't use `after:` as a cursor to follow the store, because re-reading after the last position you saw can miss an event that committed late with a lower position.
+- An event whose encryption key was destroyed still comes back, with its header (type, tags, position) and a `nil` body, flagged `body_erased?`. Erasure removes the data, not the fact that something happened. A course still counts the subscription of an erased student, and can show it as "deleted user". Materializing such an event into its class raises `ES::Exception::InvalidState`, so check `body_erased?` first.
+
+In Postgres, `setup` creates a GIN index on `header->'tags'` (`jsonb_path_ops`) and a btree index on the event handle, on new and existing stores alike. On a large existing store, building them blocks appends while it runs. Create them beforehand with `CREATE INDEX CONCURRENTLY`, using the definitions in `ES::EventStoreAdapters::Postgres::TAGS_INDEX` and `EVENT_HANDLE_INDEX`. A concurrent build that fails leaves an invalid index behind, which `setup` then skips because the name exists. `setup` logs a warning for every invalid index in the `eventstore` schema. Drop it and build it again.
+
+#### Tag versions and conditional appends
+
+Every tag has a **version** in the store: the number of events carrying it. Each tagged event raises the version of each of its tags by one, and the store stamps the new values into its header:
+
+```json
+"tags": ["course_id:0192…", "student_id:0193…"],
+"tag_versions": {"course_id:0192…": 8, "student_id:0193…": 2}
+```
+
+Appends carrying the same tag never run at the same time, so the versions of one tag have no gaps and follow commit order, whatever positions the events get. That makes "the tag is still at version 8" mean exactly "nothing carrying this tag was appended since". This is the basis for consistency.
+
+`append(events, condition)` appends a batch atomically, all or nothing. With an `ES::AppendCondition`, it appends only if every tag the condition names is still at the version it expects. Otherwise it raises `ES::Exception::Conflict` (HTTP 409), naming the tag key but never its value, and appends nothing.
+
+**A decision read** returns the events of a query together with the current version of each of its tags, read in one snapshot so the two agree. Its `condition` guards the append the decision leads to:
+
+```crystal
+query = ES::Query.new(
+  ES::QueryItem.new(CourseDefined, StudentSubscribed, tags: {course_id: course_id}),
+  ES::QueryItem.new(StudentSubscribed, tags: {student_id: student_id}),
+)
+decision = event_store.read_for_decision(query)
+
+# ... fold decision.events, decide, e.g. check the course isn't full ...
+
+event_store.append(
+  [StudentSubscribed.new(
+    actor_id: actor, command_handler: "Subscribe", course_id: course_id, student_id: student_id,
+    tags: {course_id: course_id, student_id: student_id}
+  )],
+  decision.condition
+)
+```
+
+**Deciding on eventually consistent data.** Every stored event carries its tag versions, so anything that applied the events, such as a projection, knows which version of each tag it reflects. Pass those versions as the condition, and the append fails if any of those tags moved since the data was built:
+
+```crystal
+condition = ES::AppendCondition.new
+  .expect(:user_id, user_id, version: 7)                 # plaintext tag; hashed if declared so
+  .expect_stored("organization_id:0192…", 3)             # stored form, as found in header.tag_versions
+```
+
+**Uniqueness.** Version 0 means the tag was never used: `ES::AppendCondition.new.expect(:email, email, version: 0)`.
+
+- **What a version counts:** every event carrying the tag, whatever its type and other tags. Any change to an expected tag fails the condition, including events of types the decision didn't read. Such a conflict causes a retry, never a missed conflict. Keep tags narrow (one course, one student) to keep retries rare.
+- **Items without tags:** a decision read refuses any query item that names no tags, including `ES::Query.all`, because there is no tag whose version could detect a change. Plain `read` still accepts such items.
+- **Versions are assigned by the store,** never taken from the event as given. An event read back and appended into another store gets that store's versions.
+- `append(event)` still works and now returns the event's position. `append(events)` takes an array of any event type, e.g. `[StudentSubscribed.new(...)]`, without casting.
+- **In Postgres:**
+  - Versions live in `eventstore.tag_versions`, one row per distinct tag value, never deleted. `setup` creates the table on new and existing stores. Each row holds the stored tag, so a plain value such as an email address is kept there in the clear for as long as the store exists, in addition to the event headers. Use `hashed: true` for personal data.
+  - An append locks the rows of all tags its events carry or its condition names, in one statement and in tag order, then checks, inserts and raises the versions in the same READ COMMITTED transaction. Two appends carrying the same tag therefore run one after the other. Untagged appends lock nothing.
+  - `read` and `read_for_decision` take no locks. `read_for_decision` runs in a REPEATABLE READ snapshot.
+- **The guarantee holds only if every writer raises tag versions:**
+  - Don't insert into `eventstore.events` by other means.
+  - During a rolling upgrade, wait until every writer runs 0.11 or later before relying on conditions.
+
+The GIN index finds every event carrying a tag, but it can't narrow by position. A query therefore costs in proportion to the number of events carrying its tags. That is cheap for the narrow tags consistency boundaries are made of (one course, one student), and slow for a tag shared by a large part of the store, such as a tenant id.
+
 ---
 
 ### Queue
@@ -400,7 +534,7 @@ Protected: event bodies at rest — dumps, backups, replicas, a DBA with `SELECT
 erasure by key destruction.
 
 Not protected: the event header (stays plaintext, since it drives the flattened
-view), application memory, logs, and projections — a projection built from an
+view; this includes its tags, see [Tags](#tags)), application memory, logs, and projections — a projection built from an
 encrypted event stores whatever it extracted in the clear, so purging or rebuilding
 read models after an erasure is the application's job.
 
@@ -432,11 +566,13 @@ ES::Config.configure do |c|
   c.queue       = ES::Adapters::Queues::Postgres.new(db)
   c.event_bus   = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
   c.encryption  = ES::EncryptionKeyManager.new(key_store, application_key) # optional
+  c.tag_hasher  = ES::TagHasher.new(application_key)                        # optional
 end
 ```
 
 `encryption` is optional; leaving it unset behaves exactly as it did before payload
-encryption existed.
+encryption existed. `tag_hasher` is optional too; it is only needed by events that
+declare a `hashed: true` tag.
 
 ---
 
