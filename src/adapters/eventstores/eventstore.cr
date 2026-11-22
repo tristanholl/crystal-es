@@ -22,6 +22,7 @@ module ES
     abstract def encryption_key_ids(aggregate_id : UUID) : Array(UUID)
 
     @encryption : ES::EncryptionKeyManager? = nil
+    @tag_hasher : ES::TagHasher? = nil
 
     struct Event
       getter header : JSON::Any
@@ -33,6 +34,31 @@ module ES
         @body : JSON::Any,
       )
       end
+    end
+
+    # Returns the header JSON to persist, carrying the event's tags in their
+    # stored form.
+    #
+    # The tags are derived here rather than when the event is built, because a
+    # hashed tag needs the store's hasher. That also means the plaintext value of
+    # a hashed tag never sits on a header that could be serialized elsewhere.
+    protected def encode_header(event : ES::Event) : String
+      tags = event.tags
+      return event.header.to_json if tags.empty? && event.header.tags.empty?
+
+      event.header.with_tags(tags.map { |tag| encode_tag(tag) }).to_json
+    end
+
+    # Returns the stored form of one tag
+    protected def encode_tag(tag : ES::Tag) : String
+      return tag.plain unless tag.hashed?
+
+      hasher = @tag_hasher
+      # Refusing is the only safe answer: storing the value in the clear would
+      # leak exactly what `hashed: true` was declared to protect.
+      raise ES::Exception::InvalidState.new("Tag '#{tag.key}' is declared hashed but this event store has no tag hasher configured") if hasher.nil?
+
+      hasher.encode(tag)
     end
 
     # Returns the body JSON to persist, encrypting it when the event names a key

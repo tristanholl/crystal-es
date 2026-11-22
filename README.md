@@ -69,6 +69,42 @@ end
 
 `attribute(name, type, default?)` — declare a typed field on the event body. A default value makes the field optional at construction time.
 
+#### Tags
+
+`tag(attribute, hashed: false)` — put an attribute's value on the event as a tag. Tags are the groundwork for dynamic consistency boundaries: instead of one aggregate's stream, a consistency boundary becomes "every event carrying these tags".
+
+```crystal
+define_event("course", "student_subscribed") do
+  attribute :course_id, UUID
+  attribute :student_email, String
+  tag :course_id                    # stored as "course_id:<uuid>"
+  tag :student_email, hashed: true  # stored as "student_email:<hmac>"
+end
+```
+
+- A tag must name an attribute declared in the same block. A `nil` value carries no tag.
+- Tags are written to the event header (`header.tags`) by the event store on append, in their stored form. `event.tags` returns them in plaintext, derived from the body.
+- An unknown attribute, a duplicate tag, an unknown option or a non-boolean `hashed:` is a compile error.
+- If the same tag key is `hashed: true` in one event and `hashed: false` in another, compilation emits a warning. Keeping a key consistent across events is the application's job: a query hashes a tag value according to how the key is declared, so the inconsistent events would not be found.
+
+**Hashed tags.** `hashed: true` stores an HMAC-SHA256 of the value (truncated to 128 bits), keyed by a key derived from the application encryption key. It is off by default and has to be switched on:
+
+```crystal
+ES::Config.tag_hasher = ES::TagHasher.new(application_key) # ES::ApplicationEncryptionKeyManager
+```
+
+Unhashed tags need no configuration. Appending an event with a hashed tag while no hasher is configured raises `ES::Exception::InvalidState`, rather than storing the value in the clear. Event stores read `ES::Config.tag_hasher` when they are constructed, so configure it before building them, or pass `tag_hasher:` to the store directly.
+
+What hashing does and does not protect:
+
+- A database dump alone does not reveal hashed values. A plain hash would: email addresses and names fall to a dictionary attack within seconds, which is why the digest is keyed.
+- The same value always yields the same digest, which is what lets a query find it. Whoever holds the application key can therefore still test whether a known value appears in the store. A hashed tag is pseudonymous data, not anonymous data.
+- Tags are not crypto-shredded. Destroying an event's encryption key erases its body, but not its tags. A tag derived from personal data outlives the erasure. On an `encrypted: true` event, an unhashed tag copies the attribute's value in the clear into the header.
+- Hashing only keeps a value out of the header. On an event without `encrypted: true`, the same value is still stored in the clear in the body.
+- The derived key cannot be rotated: every stored digest depends on it, the same way every wrapped data key depends on the application key.
+
+Prefer tagging by a surrogate id (a UUID) over personal data. Use `hashed: true` where that isn't possible.
+
 ---
 
 ### Aggregate
@@ -400,7 +436,7 @@ Protected: event bodies at rest — dumps, backups, replicas, a DBA with `SELECT
 erasure by key destruction.
 
 Not protected: the event header (stays plaintext, since it drives the flattened
-view), application memory, logs, and projections — a projection built from an
+view; this includes its tags, see [Tags](#tags)), application memory, logs, and projections — a projection built from an
 encrypted event stores whatever it extracted in the clear, so purging or rebuilding
 read models after an erasure is the application's job.
 
@@ -432,11 +468,13 @@ ES::Config.configure do |c|
   c.queue       = ES::Adapters::Queues::Postgres.new(db)
   c.event_bus   = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
   c.encryption  = ES::EncryptionKeyManager.new(key_store, application_key) # optional
+  c.tag_hasher  = ES::TagHasher.new(application_key)                        # optional
 end
 ```
 
 `encryption` is optional; leaving it unset behaves exactly as it did before payload
-encryption existed.
+encryption existed. `tag_hasher` is optional too; it is only needed by events that
+declare a `hashed: true` tag.
 
 ---
 

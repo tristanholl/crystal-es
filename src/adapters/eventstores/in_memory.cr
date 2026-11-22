@@ -3,10 +3,11 @@ module ES
     class InMemory < ES::EventStore
       @events : Hash(UUID, ES::EventStore::Event) = Hash(UUID, ES::EventStore::Event).new
 
-      # Initialize with an optional queue adapter and payload encryption
+      # Initialize with an optional queue adapter, payload encryption and tag hashing
       def initialize(
         @queue : ES::QueueAdapters::InMemory? = nil,
         @encryption : ES::EncryptionKeyManager? = ES::Config.encryption?,
+        @tag_hasher : ES::TagHasher? = ES::Config.tag_hasher?,
       )
       end
 
@@ -17,10 +18,11 @@ module ES
 
       # Appends an event to the event stream
       def append(event : ES::Event)
-        @events[event.header.event_id] = ES::EventStore::Event.new(JSON.parse(event.header.to_json), JSON.parse(encode_body(event)))
+        stored = ES::EventStore::Event.new(JSON.parse(encode_header(event)), JSON.parse(encode_body(event)))
+        @events[event.header.event_id] = stored
 
         q = @queue
-        q.append(event) unless q.nil?
+        q.append(stored.header) unless q.nil?
       end
 
       # Returns a single event for a given id

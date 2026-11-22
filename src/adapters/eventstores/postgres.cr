@@ -8,7 +8,12 @@ module ES
       EVENT_ID_INDEX = %(CREATE UNIQUE INDEX IF NOT EXISTS events_event_id_idx ON "eventstore"."events"((header->>'event_id'));)
 
       # Initialize with a database connection and, optionally, payload encryption
-      def initialize(@db : DB::Database, @encryption : ES::EncryptionKeyManager? = ES::Config.encryption?)
+      # and tag hashing
+      def initialize(
+        @db : DB::Database,
+        @encryption : ES::EncryptionKeyManager? = ES::Config.encryption?,
+        @tag_hasher : ES::TagHasher? = ES::Config.tag_hasher?,
+      )
       end
 
       # Initializes the database with the necessary schema, table and permissions for the eventstore
@@ -63,7 +68,7 @@ module ES
 
       # Appends an event to the event stream
       def append(event : ES::Event)
-        @db.exec %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2)), event.header.to_json, encode_body(event)
+        @db.exec %(INSERT INTO "eventstore"."events" (header, body) VALUES ($1, $2)), encode_header(event), encode_body(event)
       end
 
       # Returns a single event for a given id

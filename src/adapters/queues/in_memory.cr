@@ -10,9 +10,16 @@ module ES
 
       # Append event to queue
       def append(event : ES::Event)
+        append(JSON.parse(event.header.to_json))
+      end
+
+      # Append a stored header to the queue. The in-memory event store uses this so
+      # an entry carries the header as stored — tags included — the same as the
+      # Postgres queue, which is fed from the stored row.
+      def append(header : JSON::Any)
         c = @cursor
         @cursor += 1
-        qe = ES::Queue::Entry.new(c, 0, JSON.parse(event.header.to_json))
+        qe = ES::Queue::Entry.new(c, 0, header)
         @queue[c] = qe
       end
 
