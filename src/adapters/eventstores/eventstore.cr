@@ -63,6 +63,62 @@ module ES
       raise ES::Exception::NotImplemented.new("#{self.class.name} does not support decision reads")
     end
 
+    # Builds a decision from one or more `ES::DecisionProjection`s, each under a
+    # name: reads the events of all of them in one decision read, folds each
+    # projection over the events matching its own query, and returns their
+    # states by name together with the condition guarding the append.
+    #
+    # ```
+    # model = event_store.build_decision_model(
+    #   capacity: CourseCapacity.new(course_id),
+    #   subscriptions: CourseSubscriptions.new(course_id),
+    #   student_courses: StudentCourseCount.new(student_id),
+    # )
+    # raise "Course is full" if model.state[:subscriptions].size >= (model.state[:capacity] || 0)
+    # event_store.append([event], model.condition)
+    # ```
+    #
+    # Small projections that each answer one question keep the boundary as
+    # narrow as the decision needs. One read serves them all, so their states
+    # agree with each other and with the condition. An event matching several
+    # projections is folded into each.
+    #
+    # Built on `read_for_decision`, so it works with every adapter that
+    # implements that.
+    def build_decision_model(**projections : **T) forall T
+      {% raise "build_decision_model needs at least one projection, e.g. build_decision_model(capacity: CourseCapacity.new(course_id))" if T.keys.empty? %}
+      {% for key, type in T %}
+        {% raise "build_decision_model: '#{key}' is a #{type}, not an ES::DecisionProjection" unless type < ::ES::DecisionProjection %}
+      {% end %}
+
+      decision = read_for_decision(ES::Query.new(*projections.values.map(&.query_item)))
+      state = {% begin %}
+                {
+                  {% for key in T.keys %}
+                    {{ key.stringify }}: fold_matching(projections[{{ key.symbolize }}], decision.events),
+                  {% end %}
+                }
+              {% end %}
+      ES::DecisionModel.new(state, decision)
+    end
+
+    # Folds a projection over the events matching its own query, with its tags
+    # encoded as this store encodes them
+    protected def fold_matching(projection : ES::DecisionProjection, events : Array(ES::EventStore::Event))
+      items = encode_query(ES::Query.new(projection.query_item))
+      projection.fold(events.select { |event| event_matches?(event.header, items) })
+    end
+
+    # Whether a stored header matches any item of an encoded query
+    protected def event_matches?(header : JSON::Any, items : Array(EncodedQueryItem)) : Bool
+      handle = header["event_handle"].as_s
+      tags = header["tags"]?.try(&.as_a.map(&.as_s)) || [] of String
+
+      items.any? do |item|
+        (item.types.empty? || item.types.includes?(handle)) && item.tags.all? { |tag| tags.includes?(tag) }
+      end
+    end
+
     # Appends several events atomically — all or none — and, given a condition,
     # only if every tag it names is still at the version it expects. Raises
     # `ES::Exception::Conflict` otherwise, and appends nothing.

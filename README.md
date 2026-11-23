@@ -28,7 +28,7 @@ The library provides:
 - **Events** — immutable facts with a type-safe DSL
 - **Projections** — read models built from event streams, with a schema DSL and schema drift detection
 - **Event Bus** — fan-out published events to reactors and projections
-- **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that none of the tags a decision depended on moved (see [Tags](#tags), [Querying by tag](#querying-by-tag) and [Tag versions and conditional appends](#tag-versions-and-conditional-appends))
+- **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that none of the tags a decision depended on moved (see [Tags](#tags), [Querying by tag](#querying-by-tag), [Tag versions and conditional appends](#tag-versions-and-conditional-appends) and [Decision projections](#decision-projections))
 - **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
 
 A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction). [`./examples/course-subscription`](./examples/course-subscription) shows dynamic consistency boundaries: course capacity and a per-student limit enforced together, unique hashed emails, and erasure.
@@ -418,6 +418,68 @@ condition = ES::AppendCondition.new
   - During a rolling upgrade, wait until every writer runs 0.11 or later before relying on conditions.
 
 The GIN index finds every event carrying a tag, but it can't narrow by position. A query therefore costs in proportion to the number of events carrying its tags. That is cheap for the narrow tags consistency boundaries are made of (one course, one student), and slow for a tag shared by a large part of the store, such as a tenant id.
+
+#### Decision projections
+
+Folding `decision.events` by hand means writing the query and the fold separately, and nothing keeps them in step. A fold that handles an event type the query never selects decides on incomplete data, and the condition can't catch it, because it comes from the same query. An `ES::DecisionProjection` declares both at once, answering one question about the store:
+
+```crystal
+class CourseCapacity < ES::DecisionProjection(Int32?)
+  def initialize(@course_id : UUID); end
+
+  def initial_state : State
+    nil
+  end
+
+  tags course_id: @course_id
+
+  on CourseDefined do |_state, _event|
+    body.capacity
+  end
+end
+
+class CourseSubscribers < ES::DecisionProjection(Set(UUID))
+  def initialize(@course_id : UUID); end
+
+  def initial_state : State
+    Set(UUID).new
+  end
+
+  tags course_id: @course_id
+
+  on StudentSubscribed do |state, _event|
+    state << body.student_id
+  end
+end
+```
+
+`build_decision_model` composes projections by name. It reads the events of all of them in one decision read, folds each over the events matching its own query, and returns their states with the condition:
+
+```crystal
+model = event_store.build_decision_model(
+  capacity: CourseCapacity.new(course_id),
+  subscribers: CourseSubscribers.new(course_id),
+  student_courses: StudentCourseCount.new(student_id),
+)
+raise ES::Exception::InvalidState.new("Course is full") if model.state[:subscribers].size >= (model.state[:capacity] || 0)
+
+event_store.append([StudentSubscribed.new(...)], model.condition)
+```
+
+- **The query is derived, never written:** the projection's event types are the classes it handles with `on`, and its tags are the ones named with `tags`. `query_item` returns it.
+- **`model.state` is a named tuple,** typed per projection: `model.state[:capacity]` is an `Int32?`. `model.decision` is the underlying `ES::Decision`.
+- **Handlers** take `|state, event|` and return the next state. They also see `body`, the event's body cast to its class. `initial_state` must return a fresh value on every call, and handlers should be pure: a fold may run again on a retry.
+- **Prefer small projections** that each answer one question over one projection that answers many. An event matching several projections is folded into each, and one read serves them all, so their states agree.
+- **Erased events:** an event whose body was erased with its encryption key raises `ES::Exception::InvalidState` when folded, rather than be skipped. Declare `on_erased EventClass do |state, header| ... end` to decide on it from its header, for example to count an erased student's registration. A body also comes back erased when its key is missing for any other reason, such as a misconfigured key store: `on_erased` can't tell the two apart.
+- **`inspect` and `to_s`** of a projection name its class and tag keys, never the values. Those may be plaintext of hashed tags. A `DecisionModel` names its states and counts its events, without printing states or bodies.
+- **Checked at compile time:**
+  - a projection must handle at least one event and name its tags in exactly one `tags` call;
+  - every handled class must be an `ES::Event` that declares each of the projection's tag keys, since otherwise it could never match;
+  - a class can't be handled twice;
+  - `on_erased` needs a matching `on`;
+  - handler blocks must take two arguments;
+  - `build_decision_model` needs at least one projection, and only accepts projections.
+- **Conditions are as coarse as before:** the condition expects the versions of the projections' tags, whatever their types (see [What a version counts](#tag-versions-and-conditional-appends)).
 
 ---
 

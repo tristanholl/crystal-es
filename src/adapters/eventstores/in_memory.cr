@@ -127,7 +127,7 @@ module ES
           break if limit && result.size >= limit
 
           next if after && position <= after
-          next unless matches?(event.header, items)
+          next unless event_matches?(event.header, items)
 
           result << decode_or_erase(event.header, event.body, position)
         end
@@ -143,7 +143,7 @@ module ES
 
         events, versions = @mutex.synchronize do
           {
-            @events.compact_map { |event_id, event| {event_id, event} if matches?(event.header, items) }
+            @events.compact_map { |event_id, event| {event_id, event} if event_matches?(event.header, items) }
               .map { |event_id, event| {event, @positions[event_id]} },
             tags.to_h { |tag| {tag, @tag_versions.fetch(tag, 0_i64)} },
           }
@@ -156,16 +156,6 @@ module ES
       # races an append and a caller's block may append without deadlocking
       private def snapshot : Array({UUID, ES::EventStore::Event, Int64})
         @mutex.synchronize { @events.map { |event_id, event| {event_id, event, @positions[event_id]} } }
-      end
-
-      # Whether a stored header matches any item of an encoded query
-      private def matches?(header : JSON::Any, items : Array(EncodedQueryItem)) : Bool
-        handle = header["event_handle"].as_s
-        tags = header["tags"]?.try(&.as_a.map(&.as_s)) || [] of String
-
-        items.any? do |item|
-          (item.types.empty? || item.types.includes?(handle)) && item.tags.all? { |tag| tags.includes?(tag) }
-        end
       end
 
       # Returns the stream of events for a given aggregate
