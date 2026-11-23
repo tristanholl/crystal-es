@@ -33,6 +33,19 @@ class IndependentTagsTestEvent < ES::Event
   end
 end
 
+# Optional attributes with a default next to tags (issue #38), encrypted too,
+# since the key id is another required parameter before the attributes
+class DefaultedAttributesTaggedTestEvent < ES::Event
+  include ::ES::EventDSL
+
+  define_event "instrument", "test.instrument_requested", encrypted: true do
+    attribute :isin, String
+    attribute :extraction_id, UUID?, nil
+    attribute :source, String, "manual"
+    tag :isin, String
+  end
+end
+
 # An event bringing tags to encode on top of stored ones, which no generated
 # constructor produces
 class BothTagsTestEvent < TaggedTestEvent
@@ -183,6 +196,38 @@ describe "ES::EventDSL tags" do
 
   it "carries no tag for a nil value" do
     tagged_event(referrer: nil).tags.map(&.key).should eq(["course_id", "student_email"])
+  end
+
+  it "takes tags on an event whose attributes have defaults" do
+    key_id, extraction_id = UUID.v7, UUID.v7
+    defaulted = DefaultedAttributesTaggedTestEvent.new(
+      actor_id: nil, command_handler: "test", encryption_key_id: key_id, isin: "DE0001", tags: {isin: "DE0001"}
+    )
+    body = defaulted.body.as(DefaultedAttributesTaggedTestEvent::Body)
+    body.extraction_id.should be_nil
+    body.source.should eq("manual")
+    defaulted.tags.map(&.value).should eq(["DE0001"])
+    defaulted.header.encryption_key_id.should eq(key_id)
+
+    given = DefaultedAttributesTaggedTestEvent.new(
+      actor_id: nil, command_handler: "test", encryption_key_id: key_id, isin: "DE0001",
+      extraction_id: extraction_id, source: "import", tags: {isin: "DE0002"}, comment: "c"
+    )
+    body = given.body.as(DefaultedAttributesTaggedTestEvent::Body)
+    body.extraction_id.should eq(extraction_id)
+    body.source.should eq("import")
+    body.comment.should eq("c")
+    given.tags.map(&.value).should eq(["DE0002"])
+  end
+
+  # Tagged events declared before #38 took `tags` after all attributes; that
+  # positional order must survive
+  it "keeps tags after the attributes without a default" do
+    course_id = UUID.v7
+    event = TaggedTestEvent.new(nil, "test", course_id, "jane@example.com", {course_id: course_id, student_email: "jane@example.com", referrer: nil}, "c")
+
+    event.tags.map(&.key).should eq(["course_id", "student_email"])
+    event.body.comment.should eq("c")
   end
 
   it "leaves the header tags empty until the event is stored" do

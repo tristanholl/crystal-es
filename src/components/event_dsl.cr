@@ -31,7 +31,9 @@ module ES
     # hold the same value or not; a tag can also name something the body does not
     # carry at all, such as a second aggregate whose consistency the event takes
     # part in. The generated constructor takes the values as one `tags:` named
-    # tuple, typed by the declarations; a nil value carries no tag.
+    # tuple, typed by the declarations; a nil value carries no tag. Pass it by
+    # name: it sits after the attributes without a default and before those with
+    # one, which is why attributes without a default must be declared first.
     #
     # `hashed: true` stores a keyed digest instead of the value (see
     # `ES::TagHasher`); the default is to store the value as is. A hashed tag's
@@ -104,6 +106,22 @@ module ES
           clash = attributes.find { |attribute| attribute.args[0].id.stringify == "tags" }
           clash.raise "attribute :tags clashes with the `tags:` constructor argument of an event that declares tags" if clash
         end
+
+        # Crystal refuses a required parameter after a defaulted one. Name the
+        # offending declaration here rather than fail inside the expansion.
+        first_defaulted = attributes.find { |attribute| attribute.args.size == 3 }
+        if first_defaulted
+          seen_default = false
+          attributes.each do |attribute|
+            if attribute.args.size == 3
+              seen_default = true
+            elsif seen_default
+              attribute.raise "attribute :#{attribute.args[0].id} has no default but is declared after attribute :#{first_defaulted.args[0].id}, which has one; declare attributes without a default first"
+            end
+          end
+        end
+        required_attributes = attributes.select { |attribute| attribute.args.size != 3 }
+        defaulted_attributes = attributes.select { |attribute| attribute.args.size == 3 }
       %}
 
       {% unless tag_definitions.empty? %}
@@ -146,16 +164,17 @@ module ES
         {% if encrypted %}
           encryption_key_id : UUID,
         {% end %}
-        {% for entry in attributes %}
-          {% if entry.args.size == 3 %}
-            {{ entry.args[0].id }} : {{ entry.args[1] }} = {{ entry.args[2] }},
-          {% else %}
-            {{ entry.args[0].id }} : {{ entry.args[1] }},
-          {% end %}
-
+        {% for entry in required_attributes %}
+          {{ entry.args[0].id }} : {{ entry.args[1] }},
         {% end %}
+        # `tags` is required, so it goes before the first defaulted parameter.
+        # Attributes without a default always come first, so this keeps the
+        # positional order of every event that could be declared before.
         {% unless tag_definitions.empty? %}
           tags : NamedTuple({% for definition in tag_definitions %}{{ definition[0].id }}: {{ definition[2] }}, {% end %}),
+        {% end %}
+        {% for entry in defaulted_attributes %}
+          {{ entry.args[0].id }} : {{ entry.args[1] }} = {{ entry.args[2] }},
         {% end %}
         comment = "",
         aggregate_id = UUID.v7,

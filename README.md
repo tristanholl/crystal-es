@@ -70,7 +70,7 @@ define_event("order", "order_placed") do
 end
 ```
 
-`attribute(name, type, default?)` — declare a typed field on the event body. A default value makes the field optional at construction time.
+`attribute(name, type, default?)` — declare a typed field on the event body. A default value makes the field optional at construction time. Declare attributes without a default before those with one; the compiler rejects the other order.
 
 #### Tags
 
@@ -99,7 +99,7 @@ StudentSubscribed.new(
 )
 ```
 
-- The constructor takes the tag values as one `tags:` named tuple, whose keys and types the compiler checks against the declarations. Every declared tag must be present. One declared with a nilable type, such as `UUID?`, may be `nil`, and then the event carries no such tag. An event without tags has no `tags:` argument.
+- The constructor takes the tag values as one `tags:` named tuple, whose keys and types the compiler checks against the declarations. Every declared tag must be present. One declared with a nilable type, such as `UUID?`, may be `nil`, and then the event carries no such tag. An event without tags has no `tags:` argument. Pass `tags:` by name: it sits after the attributes without a default and before those with one.
 - Values are stored in their `to_s` form, so a query matches when it passes a value with the same `to_s`. In practice, use the same type.
 - The event store writes tags to the event header (`header.tags`) on append, in their stored form, together with their versions (`header.tag_versions`, see [Tag versions](#tag-versions-and-conditional-appends)). `event.tags` holds the plaintext values the event was built with. An event read back only has the stored form, and a hashed tag only its digest. Put a value in an attribute too if code needs it after reading the event back. Appending a read-back event again keeps its stored tags exactly as they are, without hashing them again. A store with a different application key, or with no tag hasher, won't find its hashed tags. Stored tags are checked before they are kept, because a header can also come from elsewhere, such as a queue message. Every key must be declared by the event class, and a hashed key must hold a digest. Otherwise the append raises `ES::Exception::InvalidState`.
 - A tag without a type, a duplicate tag, an unknown option, a non-boolean `hashed:`, or an attribute named `tags` next to declared tags is a compile error.
