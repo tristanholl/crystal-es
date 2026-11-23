@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.2
+
+### Fixed
+
+- **`define_event` compiles when an event declares tags and an attribute with a default** ([#38](https://github.com/tristanholl/crystal-es/issues/38)). The generated constructor put the required `tags:` parameter after every attribute, so a defaulted attribute such as `attribute :extraction_id, UUID?, nil` before it failed with `parameter must have a default value`. `tags:` now sits between the attributes without a default and those with one. Every event that compiled before keeps its parameter order, positional calls included.
+- **An attribute without a default declared after one with a default** is now refused with a compile error naming both attributes. It used to fail inside the macro expansion.
+
+### Upgrading from 0.11.1
+
+- No code changes. A tagged event can now keep its attribute defaults; the workaround from #38 (dropping them and passing `nil` explicitly) can be reverted.
+
 ## 0.11.1
 
 ### Fixed

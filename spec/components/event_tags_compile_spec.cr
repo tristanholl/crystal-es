@@ -51,14 +51,15 @@ describe "ES::EventDSL tag compile-time checks" do
   end
 
   {
-    %(tag :email)                                  => "takes a name and a type",
-    %(tag :email, String\ntag :email, String)      => "is declared twice",
-    %(tag :email, String, hashed: "yes")           => "expects `hashed:` to be true or false",
-    %(tag :email, String, hashd: true)             => "unknown option 'hashd'",
-    %(tag "email", String)                         => "expects a symbol as its name",
-    %(tag :email, String, UUID)                    => "takes a name and a type",
-    %(attribute :tags, String\ntag :email, String) => "attribute :tags clashes",
-    %(something_else :email)                       => "only accepts `attribute` and `tag` declarations",
+    %(tag :email)                                             => "takes a name and a type",
+    %(tag :email, String\ntag :email, String)                 => "is declared twice",
+    %(tag :email, String, hashed: "yes")                      => "expects `hashed:` to be true or false",
+    %(tag :email, String, hashd: true)                        => "unknown option 'hashd'",
+    %(tag "email", String)                                    => "expects a symbol as its name",
+    %(tag :email, String, UUID)                               => "takes a name and a type",
+    %(attribute :tags, String\ntag :email, String)            => "attribute :tags clashes",
+    %(something_else :email)                                  => "only accepts `attribute` and `tag` declarations",
+    %(attribute :note, String?, nil\nattribute :late, String) => "attribute :late has no default but is declared after attribute :note",
   }.each do |declaration, message|
     it "rejects `#{declaration.gsub('\n', "; ")}`" do
       ok, output = compile_events(event_with(declaration))
