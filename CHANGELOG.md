@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.3
+
+### Added
+
+- **Decision projections** (`ES::DecisionProjection`). A projection declares the events it handles (`on EventClass do |state, event| ... end`) and the tags they must carry (`tags course_id: @course_id`). Its query is derived from those declarations, so the events a decision reads, its fold and its append condition can't drift apart. `on_erased` folds an event whose body was erased, from its header. Invalid declarations are compile errors, among them a handled class that doesn't declare one of the projection's tag keys and so could never match.
+- **`EventStore#build_decision_model(**projections)`** composes named projections. It reads all their events in one decision read, folds each projection over the events matching its own query, and returns an `ES::DecisionModel` with the states as a typed named tuple (`model.state[:capacity]`) and the `condition` to append with. It works with every adapter that implements `read_for_decision`.
+- The course-subscription example now builds its decision from three projections.
+
+### Upgrading from 0.11.2
+
+- No code changes. Hand-written decision reads keep working.
+- New reserved names in subclasses of `ES::DecisionProjection`: the `State` alias, the constants `DECISION_HANDLED`, `DECISION_ERASED` and `DECISION_TAGS`, and the methods `apply_event`, `apply_erased_event`, `apply_stored`, `tag_filter`, `query_item` and `fold`.
+- Custom event store adapters get `build_decision_model` for free once they implement `read_for_decision`. The base class gains the protected helpers `event_matches?` and `fold_matching`; an adapter defining methods of those names overrides them.
+- The in-memory event store's private `matches?` moved to the base class as `event_matches?`. Only a subclass of `ES::EventStoreAdapters::InMemory` calling it is affected.
+
 ## 0.11.2
 
 ### Fixed
