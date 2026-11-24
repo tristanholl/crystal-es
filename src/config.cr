@@ -76,6 +76,12 @@ module ES
       p
     end
 
+    # The projection database if one is configured, for components that can
+    # work without one
+    def projection_database? : DB::Database?
+      @@projection_database
+    end
+
     def projection_registry=(param : ES::ProjectionRegistry)
       @@projection_registry = param
     end

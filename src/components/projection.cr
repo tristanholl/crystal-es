@@ -12,6 +12,11 @@ module ES
     @@table = ""
     @@init : Bool = false
     @@projection_batch_size : Int64 = 1000_i64
+    @@atomic : Bool = false
+
+    # The connection of the transaction a subscription applies a batch in,
+    # while it does; see `write`
+    @write_connection : DB::Connection? = nil
 
     @event_handlers : ES::EventHandlers
     @event_store : ES::EventStore
@@ -43,6 +48,51 @@ module ES
 
     def self.projection_batch_size : Int64
       @@projection_batch_size
+    end
+
+    # Whether every write of this projection goes through `write`, declared
+    # with `define_projection(..., atomic: true)`. `ES::Subscriptions` then
+    # applies events in batches, each in one transaction with the
+    # projection's position, so every event is applied exactly once. Without
+    # it, a subscription applies one event at a time and records the position
+    # after it, so an event may be applied again after a crash.
+    def self.atomic? : Bool
+      @@atomic
+    end
+
+    # The schema of the projection's table, `public` if it names none
+    def self.table_schema : String
+      parts = @@table.split('.')
+      parts.size >= 2 ? parts[0] : "public"
+    end
+
+    # Runs the block with a connection to write the projection's rows on. While
+    # `ES::Subscriptions` applies a batch, that is the connection of the
+    # batch's transaction, so the rows commit together with the projection's
+    # position; otherwise the block runs in a transaction of its own.
+    #
+    # ```
+    # apply(OrderPlaced) do
+    #   write do |connection|
+    #     connection.exec %(INSERT INTO "shop"."orders" (id, total) VALUES ($1, $2)), aggregate_id, body.total
+    #   end
+    # end
+    # ```
+    protected def write(& : DB::Connection ->)
+      if connection = @write_connection
+        yield connection
+      else
+        @projection_database.transaction { |tx| yield tx.connection }
+      end
+    end
+
+    # :nodoc:
+    # Makes `write` use `connection` while the block runs
+    def writing_on(connection : DB::Connection, &)
+      @write_connection = connection
+      yield
+    ensure
+      @write_connection = nil
     end
 
     def call(event : ES::Event)

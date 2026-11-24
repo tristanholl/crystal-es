@@ -22,11 +22,24 @@ module ES
       # compare against. One row per distinct tag value; rows are never deleted.
       TAG_VERSIONS_TABLE = %(CREATE TABLE IF NOT EXISTS "eventstore"."tag_versions" ("tag" TEXT PRIMARY KEY, "version" BIGINT NOT NULL);)
 
+      # Serves `read_log` and `log_head`, which order and bound events by the
+      # transaction that appended them. Events stored before the column existed
+      # have no transaction id and count as transaction 0, ahead of all others.
+      LOG_POSITION_INDEX = %(CREATE INDEX IF NOT EXISTS events_log_position_idx ON "eventstore"."events" ((COALESCE(transaction_id, '0'::xid8)), id);)
+
+      # The appending transaction of every event, which is what makes the store
+      # readable as a log. Set by default, never by the library, so the column
+      # costs appends nothing. xid8 needs Postgres 13.
+      private TRANSACTION_ID_COLUMN = %("transaction_id" xid8 DEFAULT pg_current_xact_id())
+
+      private LOG_COLUMN_EXISTS = %(SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'eventstore' AND table_name = 'events' AND column_name = 'transaction_id'))
+
       # The indexes `setup` adds to a store created before they existed, by name
       private EXISTING_STORE_INDEXES = {
         "events_event_id_idx"     => EVENT_ID_INDEX,
         "events_tags_idx"         => TAGS_INDEX,
         "events_event_handle_idx" => EVENT_HANDLE_INDEX,
+        "events_log_position_idx" => LOG_POSITION_INDEX,
       }
 
       # Session advisory lock that lets one `setup` of an existing store run at a time
@@ -52,6 +65,7 @@ module ES
             # Default privileges only cover tables created by the role that set
             # them, which need not be the one running this setup
             connection.exec %(GRANT SELECT ON "eventstore"."tag_versions" TO pg_monitor;)
+            add_transaction_id_column(connection)
             build_missing_indexes(connection)
           end
           warn_about_invalid_indexes
@@ -65,11 +79,12 @@ module ES
         migrations << %( GRANT SELECT ON ALL SEQUENCES IN SCHEMA "eventstore" TO pg_monitor; )
         migrations << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON TABLES TO pg_monitor; )
         migrations << %( ALTER DEFAULT PRIVILEGES IN SCHEMA "eventstore" GRANT SELECT ON SEQUENCES TO pg_monitor; )
+        log = log_supported?(@db)
         migrations << %(
           CREATE TABLE "eventstore"."events" (
             "id" BIGSERIAL PRIMARY KEY,
             "header" jsonb NOT NULL,
-            "body" jsonb NOT NULL
+            "body" jsonb NOT NULL#{log ? ",\n            #{TRANSACTION_ID_COLUMN}" : ""}
           );
         )
 
@@ -77,6 +92,7 @@ module ES
         migrations << EVENT_ID_INDEX
         migrations << TAGS_INDEX
         migrations << EVENT_HANDLE_INDEX
+        migrations << LOG_POSITION_INDEX if log
         migrations << TAG_VERSIONS_TABLE
 
         migrations << %(
@@ -140,8 +156,10 @@ module ES
       private def build_missing_indexes(connection : DB::Connection)
         rebuild_invalid_indexes(connection)
         existing = index_names(connection)
+        log_column = connection.query_one(LOG_COLUMN_EXISTS, as: Bool)
         EXISTING_STORE_INDEXES.each do |name, statement|
           next if existing.includes?(name)
+          next if statement == LOG_POSITION_INDEX && !log_column
 
           if existing.includes?(rebuild_name(name))
             # A rebuild that stopped between dropping the old index and renaming
@@ -151,6 +169,54 @@ module ES
             connection.exec concurrently(statement)
           end
         end
+      end
+
+      # Adds the transaction column to a store created before it existed. Only
+      # where it is missing: the ALTER briefly locks the table against appends.
+      # Neither statement rewrites the table: the column is added without a
+      # default, and the default set afterwards applies to new rows only. Rows
+      # already stored keep no transaction id (the table is append-only), which
+      # `read_log` reads as transaction 0.
+      #
+      # The ALTER waits for every transaction using the table to finish, and
+      # every read and append arriving meanwhile queues behind it. So it gives
+      # up after a short lock timeout, and is tried a few times before setup
+      # moves on with a warning naming the statements to run by hand.
+      private def add_transaction_id_column(connection : DB::Connection)
+        return unless log_supported?(connection)
+        return if connection.query_one(LOG_COLUMN_EXISTS, as: Bool)
+
+        TRANSACTION_ID_ATTEMPTS.times do |attempt|
+          connection.transaction do |tx|
+            tx.connection.exec %(SET LOCAL lock_timeout = '2s')
+            tx.connection.exec ADD_TRANSACTION_ID
+            tx.connection.exec SET_TRANSACTION_ID_DEFAULT
+          end
+          return
+        rescue ex
+          # crystal-pg is not a dependency of the library, so its error class
+          # can't be named here; a lock timeout is SQLSTATE 55P03
+          raise ex unless ex.message.to_s.includes?("lock timeout")
+          Log.warn { "Adding eventstore.events.transaction_id waited too long for a lock (attempt #{attempt + 1} of #{TRANSACTION_ID_ATTEMPTS})" }
+          sleep 1.second
+        end
+
+        # The store works without the column; only reading it as a log needs
+        # it, and that refuses until the column exists
+        Log.warn do
+          "Could not add the transaction_id column to eventstore.events: long-running transactions kept the table locked. " \
+          "Reading the store as a log (subscriptions) needs it: run these at a quiet moment, or setup again: #{ADD_TRANSACTION_ID}; #{SET_TRANSACTION_ID_DEFAULT}"
+        end
+      end
+
+      private TRANSACTION_ID_ATTEMPTS    = 5
+      private ADD_TRANSACTION_ID         = %(ALTER TABLE "eventstore"."events" ADD COLUMN IF NOT EXISTS "transaction_id" xid8)
+      private SET_TRANSACTION_ID_DEFAULT = %(ALTER TABLE "eventstore"."events" ALTER COLUMN "transaction_id" SET DEFAULT pg_current_xact_id())
+
+      # xid8 and pg_current_xact_id came with Postgres 13. On older servers the
+      # store works as before, without `read_log`.
+      private def log_supported?(connection : DB::Connection | DB::Database) : Bool
+        connection.query_one(%(SELECT current_setting('server_version_num')::int), as: Int32) >= 130000
       end
 
       # Plain CREATE INDEX blocks writes to the table for the whole build. The
@@ -262,10 +328,7 @@ module ES
         tags = (encoded.flat_map(&.tags) + expected.keys).uniq.sort!
         position = 0_i64
 
-        @db.transaction do |tx|
-          connection = tx.connection
-          connection.exec %(SET TRANSACTION ISOLATION LEVEL READ COMMITTED)
-
+        write_transaction do |connection|
           current = {} of String => Int64
           unless tags.empty?
             # The no-op update is what takes the row lock on an existing row
@@ -299,9 +362,23 @@ module ES
         position
       end
 
+      # Runs an append's statements in their own READ COMMITTED transaction
+      protected def write_transaction(&)
+        @db.transaction do |tx|
+          connection = tx.connection
+          connection.exec %(SET TRANSACTION ISOLATION LEVEL READ COMMITTED)
+          yield connection
+        end
+      end
+
+      # Where reads run: the pool, or the connection of a bound store
+      protected def queryable : DB::Database | DB::Connection
+        @db
+      end
+
       # Returns a single event for a given id
       def fetch_event(event_id : UUID) : ES::EventStore::Event
-        header, body = @db.query_one %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id'=$1), event_id, as: {JSON::Any, JSON::Any}
+        header, body = queryable.query_one %(SELECT header, body FROM "eventstore"."events" WHERE header->>'event_id'=$1), event_id, as: {JSON::Any, JSON::Any}
         decode(header, body)
       rescue DB::NoResultsError
         raise ES::Exception::NotFound.new("Event '#{event_id}' not found in eventstore")
@@ -310,7 +387,7 @@ module ES
       # Streams all events in global chronological order via cursor-based pagination
       def each_event(until_event_id : UUID? = nil, batch_size : Int64 = 1000, &block : ES::EventStore::Event ->)
         if uid = until_event_id
-          exists = @db.query_one?(
+          exists = queryable.query_one?(
             %((SELECT (header->>'event_id')::uuid FROM "eventstore"."events" WHERE header->>'event_id' = $1)),
             uid, as: UUID
           )
@@ -320,12 +397,12 @@ module ES
         cursor = 0_i64
         loop do
           rows = if uid = until_event_id
-                   @db.query_all(
+                   queryable.query_all(
                      %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE id > $1 AND id <= (SELECT id FROM "eventstore"."events" WHERE header->>'event_id' = $2) ORDER BY id ASC LIMIT $3),
                      cursor, uid.to_s, batch_size, as: {Int64, JSON::Any, JSON::Any}
                    )
                  else
-                   @db.query_all(
+                   queryable.query_all(
                      %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE id > $1 ORDER BY id ASC LIMIT $2),
                      cursor, batch_size, as: {Int64, JSON::Any, JSON::Any}
                    )
@@ -346,7 +423,7 @@ module ES
 
       # Returns the event_id of the most recently appended event, or nil if the store is empty
       def last_event_id : UUID?
-        result = @db.query_one?(
+        result = queryable.query_one?(
           %(SELECT header->>'event_id' FROM "eventstore"."events" ORDER BY id DESC LIMIT 1),
           as: String
         )
@@ -355,7 +432,7 @@ module ES
 
       # Returns the encryption keys used across an aggregate's stream
       def encryption_key_ids(aggregate_id : UUID) : Array(UUID)
-        @db.query_all(
+        queryable.query_all(
           %(SELECT DISTINCT header->>'encryption_key_id' FROM "eventstore"."events" WHERE header->>'aggregate_id' = $1 AND header->>'encryption_key_id' IS NOT NULL),
           aggregate_id, as: String
         ).map { |id| UUID.new(id) }
@@ -378,7 +455,7 @@ module ES
           sql += %( LIMIT $#{args.size})
         end
 
-        @db.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any}).map do |id, header, body|
+        queryable.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any}).map do |id, header, body|
           decode_or_erase(header, body, id)
         end
       end
@@ -393,19 +470,27 @@ module ES
         args = [] of DB::Any | Array(String)
         sql = %(SELECT id::BIGINT, header, body FROM "eventstore"."events" WHERE #{query_condition(items, args)} ORDER BY id ASC)
 
+        rows, versions = decision_rows(sql, args, tags)
+        ES::Decision.new(rows.map { |id, header, body| decode_or_erase(header, body, id) }, versions)
+      end
+
+      protected def decision_rows(sql : String, args : Array(DB::Any | Array(String)), tags : Array(String)) : {Array({Int64, JSON::Any, JSON::Any}), Hash(String, Int64)}
         rows = [] of {Int64, JSON::Any, JSON::Any}
         versions = tags.to_h { |tag| {tag, 0_i64} }
         @db.transaction do |tx|
           connection = tx.connection
           connection.exec %(SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY)
           rows = connection.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any})
-          connection.query_all(
-            %(SELECT tag, version FROM "eventstore"."tag_versions" WHERE tag = ANY($1::text[])),
-            tags, as: {String, Int64}
-          ).each { |tag, version| versions[tag] = version }
+          read_tag_versions(connection, tags, versions)
         end
+        {rows, versions}
+      end
 
-        ES::Decision.new(rows.map { |id, header, body| decode_or_erase(header, body, id) }, versions)
+      protected def read_tag_versions(connection : DB::Connection, tags : Array(String), versions : Hash(String, Int64)) : Nil
+        connection.query_all(
+          %(SELECT tag, version FROM "eventstore"."tag_versions" WHERE tag = ANY($1::text[])),
+          tags, as: {String, Int64}
+        ).each { |tag, version| versions[tag] = version }
       end
 
       # Builds the WHERE condition for an encoded query, appending its parameters
@@ -435,7 +520,7 @@ module ES
       def fetch_events(aggregate_id : UUID) : Array(ES::EventStore::Event)
         event_array = Array(ES::EventStore::Event).new
 
-        prepared_statement = @db.build(%(SELECT header, body FROM "eventstore"."events" WHERE header->>'aggregate_id'=$1 ORDER BY (header->>'aggregate_version')::INT ASC))
+        prepared_statement = queryable.build(%(SELECT header, body FROM "eventstore"."events" WHERE header->>'aggregate_id'=$1 ORDER BY (header->>'aggregate_version')::INT ASC))
 
         prepared_statement.query(aggregate_id) do |result|
           result.each do
@@ -444,6 +529,158 @@ module ES
         end
 
         event_array
+      end
+
+      # The newest position whose transaction, and every one before it, has
+      # finished. `pg_snapshot_xmin` is the oldest transaction still running:
+      # anything older has committed or rolled back, and a transaction started
+      # later always gets a higher id, so nothing can appear at or before the
+      # returned position any more.
+      def log_head : LogPosition
+        require_log!
+        row = queryable.query_one?(
+          %(SELECT #{LOG_TRANSACTION}::text::bigint, id::BIGINT FROM "eventstore"."events" WHERE #{LOG_TRANSACTION} < pg_snapshot_xmin(pg_current_snapshot()) ORDER BY #{LOG_TRANSACTION} DESC, id DESC LIMIT 1),
+          as: {Int64, Int64}
+        )
+        row ? LogPosition.new(row[0], row[1]) : LogPosition::ZERO
+      end
+
+      # Reads the events after `after` up to the head, in (transaction, id) order.
+      # The bound is taken first: everything at or before it is final, so the
+      # page never changes under a reader, whatever commits meanwhile.
+      def read_log(after : LogPosition, limit : Int32 = 1000, handles : Array(String)? = nil, partition : {Int32, Int32}? = nil) : LogPage
+        validate_log_options(limit, partition)
+        head = log_head
+        return LogPage.new([] of ES::EventStore::Event, after) if head <= after
+
+        args = [after.transaction_id.to_s, after.id, head.transaction_id.to_s, head.id] of DB::Any | Array(String)
+        sql = %(SELECT #{LOG_TRANSACTION}::text::bigint, id::BIGINT, header, body FROM "eventstore"."events" WHERE (#{LOG_TRANSACTION}, id) > ($1::xid8, $2) AND (#{LOG_TRANSACTION}, id) <= ($3::xid8, $4))
+        if types = handles
+          return LogPage.new([] of ES::EventStore::Event, head) if types.empty?
+          args << types
+          sql += %( AND header->>'event_handle' = ANY($#{args.size}::text[]))
+        end
+        if part = partition
+          index, count = part
+          args << count << index
+          sql += %( AND (hashtext(header->>'aggregate_id') & 2147483647) % $#{args.size - 1} = $#{args.size})
+        end
+        args << limit
+        sql += %( ORDER BY #{LOG_TRANSACTION}, id LIMIT $#{args.size})
+
+        events = queryable.query_all(sql, args: args, as: {Int64, Int64, JSON::Any, JSON::Any}).map do |transaction_id, id, header, body|
+          decode_or_erase(header, body, id, LogPosition.new(transaction_id, id))
+        end
+
+        last = events.size == limit ? events.last.log_position : head
+        LogPage.new(events, last || head)
+      end
+
+      # Runs the block in one READ COMMITTED transaction with a store bound to
+      # it. Appends through that store run in savepoints, so a conflict rolls
+      # back only the append that failed.
+      #
+      # Tag version rows an append locks stay locked until the whole block
+      # commits, so keep the block short: an append from elsewhere that carries
+      # one of those tags waits for it. A command handler inside the block that
+      # appends through the pooled store instead of the yielded one, with such a
+      # tag, waits on this very transaction and never returns.
+      def transaction(& : ES::EventStore -> T) : T forall T
+        @db.using_connection do |connection|
+          tx = connection.begin_transaction
+          begin
+            tx.connection.exec %(SET TRANSACTION ISOLATION LEVEL READ COMMITTED)
+            value = yield Bound.new(@db, tx, @encryption, @tag_hasher)
+          rescue ex
+            tx.rollback unless tx.closed?
+            raise ex
+          end
+          tx.commit unless tx.closed?
+          value
+        end
+      end
+
+      # Coordinates subscriptions in this store's database
+      def subscription_store(listen_url : String? = nil) : ES::SubscriptionStore
+        ES::SubscriptionStoreAdapters::Postgres.new(@db, listen_url: listen_url)
+      end
+
+      # The expression positions are ordered by. It must stay identical to the
+      # one in LOG_POSITION_INDEX, or the planner will not use the index.
+      private LOG_TRANSACTION = %(COALESCE(transaction_id, '0'::xid8))
+
+      @log_ready : Bool? = nil
+
+      # Refuses log reads on a store without the transaction column: one set up
+      # on Postgres before 13, or not set up again since upgrading
+      #
+      # Checks once, too, that no stored transaction id lies ahead of this
+      # cluster's transaction counter. Transaction ids only mean something in
+      # the cluster that assigned them: a store moved with pg_dump or logical
+      # replication can bring ids the new cluster has not reached yet, and
+      # every event appended afterwards would sort before them, hidden from
+      # subscriptions until the counter caught up. Refused instead.
+      private def require_log!
+        ready = @log_ready
+        if ready.nil?
+          ready = queryable.query_one(LOG_COLUMN_EXISTS, as: Bool)
+          raise ES::Exception::NotImplemented.new("Reading the event store as a log needs Postgres 13 or later and the transaction_id column, which `setup` adds (see its warning if it could not)") unless ready
+
+          ahead = queryable.query_one(
+            %(SELECT COALESCE((SELECT #{LOG_TRANSACTION} FROM "eventstore"."events" ORDER BY #{LOG_TRANSACTION} DESC, id DESC LIMIT 1) >= pg_snapshot_xmax(pg_current_snapshot()), false)),
+            as: Bool
+          )
+          raise ES::Exception::InvalidState.new("eventstore.events holds transaction ids ahead of this cluster's transaction counter, e.g. after pg_dump or logical replication from another cluster. Advance the counter past the highest stored transaction_id before reading the store as a log.") if ahead
+
+          @log_ready = true
+        end
+        raise ES::Exception::NotImplemented.new("Reading the event store as a log needs Postgres 13 or later and the transaction_id column, which `setup` adds (see its warning if it could not)") unless ready
+      end
+
+      # An event store bound to one transaction, yielded by `Postgres#transaction`
+      class Bound < Postgres
+        def initialize(
+          @db : DB::Database,
+          @tx : DB::Transaction,
+          @encryption : ES::EncryptionKeyManager?,
+          @tag_hasher : ES::TagHasher?,
+        )
+        end
+
+        # The connection of the transaction, for work that has to commit with it
+        def connection : DB::Connection
+          @tx.connection
+        end
+
+        protected def queryable : DB::Database | DB::Connection
+          @tx.connection
+        end
+
+        # An append in a savepoint of the outer transaction
+        protected def write_transaction(&)
+          @tx.transaction do |savepoint|
+            yield savepoint.connection
+          end
+        end
+
+        # The isolation level of a running transaction can't change, so versions
+        # are read first and events second. A version raised in between then
+        # sits above what the read saw and fails the append's condition, which
+        # is safe; the other order could pass with events missing.
+        protected def decision_rows(sql : String, args : Array(DB::Any | Array(String)), tags : Array(String)) : {Array({Int64, JSON::Any, JSON::Any}), Hash(String, Int64)}
+          versions = tags.to_h { |tag| {tag, 0_i64} }
+          read_tag_versions(connection, tags, versions)
+          {connection.query_all(sql, args: args, as: {Int64, JSON::Any, JSON::Any}), versions}
+        end
+
+        # Already in a transaction: nested blocks join it
+        def transaction(& : ES::EventStore -> T) : T forall T
+          yield self
+        end
+
+        def setup
+          raise ES::Exception::InvalidState.new("setup can't run inside a transaction")
+        end
       end
     end
   end
