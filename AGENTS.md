@@ -17,6 +17,7 @@ src/
   exceptions/            # ES::Exception::* — one class per file
 spec/                    # mirrors src/; spec_helper.cr holds shared test events
 examples/                # runnable example applications; keep them compiling
+docs/                    # user guide, one page per domain; README.md links to each
 .claude/agents/          # compat-reviewer, security-reviewer
 ```
 
@@ -60,4 +61,4 @@ The compiler floor is `crystal: '>= 1.14.0'` (`shard.yml`). Don't use stdlib API
 - After every code change, and before committing, run the **compat-reviewer** and **security-reviewer** agents in `.claude/agents/`. Both are read-only and report findings; act on them or explain why not.
 - Concurrency and locking specs must show they can fail: temporarily remove the mechanism under test and confirm the spec fails before relying on it. Racing fibers need their connections opened up front, otherwise connection setup serializes them.
 - Never attribute work to an AI tool in commits, pull requests, issues or review comments: no `Co-Authored-By` trailer for an assistant, and no "Generated with …" line.
-- Keep the README in step with behaviour. It documents guarantees as well as limits, such as what encryption and hashing don't protect.
+- Keep the README and `docs/` in step with behaviour. The README is the landing page (overview, documentation index, walkthrough); each feature is documented in its page under `docs/`. Together they document guarantees as well as limits, such as what encryption and hashing don't protect.
