@@ -28,6 +28,7 @@ The library provides:
 - **Events** — immutable facts with a type-safe DSL
 - **Projections** — read models built from event streams, with a schema DSL and schema drift detection
 - **Event Bus** — fan-out published events to reactors and projections
+- **Subscriptions** — deliver events to reactors and projections exactly once and in order, across any number of application instances, on Postgres alone (see [Subscriptions](#subscriptions))
 - **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that none of the tags a decision depended on moved (see [Tags](#tags), [Querying by tag](#querying-by-tag), [Tag versions and conditional appends](#tag-versions-and-conditional-appends) and [Decision projections](#decision-projections))
 - **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
 
@@ -274,6 +275,8 @@ Operator classes from extensions need the extension installed first. For example
 
 A projection consumes only the events it declares an `apply` for; `EventBus#subscribe` rejects a subscription to any other event. To consume everything, override the catch-all `apply(event : ES::Event)` instead.
 
+**`define_projection(table, atomic: true)`** declares that every write of the projection goes through `write { |connection| ... }`. [Subscriptions](#projections) then apply events in batches, each committed together with the projection's position.
+
 #### Schema Drift Detection
 
 Every projection schema is **immutable**. When `setup_table` is called, the library computes a SHA-256 fingerprint of the compiled schema (columns, types, nullability, defaults, indexes) and compares it against the fingerprint stored in `_crystal_es_projection_metadata`. If they diverge, a `ES::Exception::SchemaDrift` exception is raised before the projection can run.
@@ -330,6 +333,125 @@ This wiring is the single place where workflows are defined — one event may fa
 bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 ```
 
+`publish` runs every subscriber in the calling process, one after another. That is enough for one instance and for specs. To run several instances of an application, deliver events with [Subscriptions](#subscriptions) instead: the bus wiring stays the single place where routing is defined.
+
+---
+
+### Subscriptions
+
+`ES::Subscriptions` delivers events from the event store to every reactor and projection wired in the `EventBus`, so that any number of application instances can run side by side. Each handler becomes a **subscription**. It follows the event store as a log from its own saved position, at its own pace. Exactly one instance processes a subscription at a time, and the instances share the subscriptions out evenly between them. No message broker is needed: everything lives in the event store's Postgres database.
+
+![Subscriptions architecture](./assets/subscriptions-architecture.svg)
+
+The editable diagram is [`assets/subscriptions-architecture.drawio`](./assets/subscriptions-architecture.drawio).
+
+```crystal
+require "pg"
+
+# The bus, event store, event handlers and projection database come from ES::Config
+subscriptions = ES::Subscriptions.new(listen_url: ENV["DATABASE_URL"])
+subscriptions.configure(OnOrderPlaced, partitions: 4) # optional, see below
+subscriptions.start                                   # returns; processing runs in fibers
+at_exit { subscriptions.stop }
+```
+
+Start it after `event_store.setup` and after the projections' `setup`, on every instance. `start` creates the tables it needs, gives new subscriptions their starting position and takes this instance's share. `stop` lets each subscription finish the event or batch at hand, then hands it over to the other instances.
+
+#### What is guaranteed
+
+| | Reactors | Projections |
+|---|---|---|
+| Order | Append order per subscription (per aggregate when partitioned) | Same |
+| Delivery | **Exactly once.** The reactor runs in an event store transaction together with the move of its position. Everything it appends through the store it was given commits with it, or not at all. | **Exactly once for `atomic: true` projections.** A batch of events and the projection's position commit in one transaction of the projection's database. Other projections apply one event at a time and save the position after it, so an event may be applied twice if the process dies in between. An event skipped because a key is missing (see below) also keeps the writes it made before that. |
+| Where a new subscription starts | `:now`: a new reactor never acts on history. Pass `start: :beginning` to change that. | `:beginning` into an empty table. A table with rows but no position is refused. Use `start: :now` if it already holds every event so far. |
+| Failure | Rolled back, retried with exponential backoff, paused after `max_attempts` (10). Only that subscription stops. | Same. A failed batch rolls back as a whole. |
+| Position kept in | `eventstore.subscriptions` | `_crystal_es_projection_checkpoints` in the projection's schema, next to its rows |
+
+#### Reactors
+
+Nothing changes in a reactor. It receives an event store bound to its transaction as `@event_store`. Pass it on, as reactors already do, and every command handler's append joins the transaction:
+
+```crystal
+class OnOrderPlaced < ES::Reactor
+  def call(event : OrderPlaced)
+    ReserveStockHandler.new(event_store: @event_store).handle(ReserveStock.new(event.header.aggregate_id))
+  end
+end
+```
+
+- **A handler that falls back to `ES::Config.event_store` writes outside the transaction.** Its append is not rolled back with the reactor. If it carries a tag the transaction has locked, it waits on that transaction forever on Postgres. The in-memory store raises instead.
+- **Keep reactors short.** A reactor's transaction holds the tag rows it appended to, and while it is open no subscription can read past it (see [How it works](#how-it-works)). Send slow work (mail, HTTP calls, language models) to a job queue, with idempotent jobs.
+- **A reactor that reads a projection** may run before that projection has caught up, since each subscription has its own pace. Hydrate the aggregate instead, or wait explicitly: `subscriptions.await(OrdersProjection, event, timeout: 5.seconds)` returns once the projection has processed the event, or false after the timeout.
+
+#### Projections
+
+Declare a projection `atomic: true` and write its rows through `write`. While a subscription applies a batch, `write` yields the connection of the batch's transaction. Otherwise it opens a transaction of its own, so the projection still works with `EventBus#publish`:
+
+```crystal
+class OrdersProjection < ES::Projection
+  include ES::ProjectionDSL
+
+  define_projection "shop.orders", atomic: true do
+    column :id, UUID, primary_key: true
+    column :total, Int64
+  end
+
+  apply(OrderPlaced) do
+    write do |connection|
+      connection.exec %(INSERT INTO "shop"."orders" (id, total) VALUES ($1, $2)), aggregate_id, body.total
+    end
+  end
+end
+```
+
+An `atomic: true` projection must write *only* through `write`: rows written on another connection don't roll back with a failed batch. `init: true` doesn't combine with subscriptions and is refused, because a subscription fills an empty projection from the beginning by itself. A projection can live in another database: `configure(OrdersProjection, database: reporting_db)`.
+
+#### Partitions
+
+`configure(handler, partitions: n)` splits a subscription by aggregate id into `n` subscriptions, so up to `n` instances process that handler at once. Events of one aggregate stay in order. Partitions are fixed once a subscription has a position: changing them in place is refused.
+
+#### Operations
+
+```crystal
+subscriptions.status                       # => [Status(name, status, position, head, caught_up?, attempts, last_error, owned?)]
+subscriptions.pause(OrdersProjection)      # on whichever instance holds it
+subscriptions.resume(OrdersProjection)     # retries it, with its attempts reset
+subscriptions.skip_failed_event(OnOrderPlaced)  # move past the event it keeps failing on (logged)
+subscriptions.rebuild(OrdersProjection)    # truncate and replay; a non-atomic projection must be paused first
+subscriptions.reset(OnOrderPlaced, to: :now) # or :beginning to run a reactor over history again
+```
+
+`status` reads the shared state, so any instance, or a one-off console, can report on all of them. A pause or reset made on one instance reaches the instance holding the subscription within `rebalance_interval` (5 seconds).
+
+Options of `ES::Subscriptions.new`: `poll_interval` (1 second: how often to look for new events when not woken), `rebalance_interval` (5 seconds), `max_attempts` (10), `retry_base_delay` (1 second) and `retry_max_delay` (5 minutes).
+
+`listen_url` makes an instance wake up the moment events are appended (Postgres LISTEN/NOTIFY, needs `require "pg"`). Without it, new events are picked up at the next poll. Listening has a cost for every writer of the store: it installs a trigger that sends a notification from each append transaction, and Postgres commits transactions that sent a notification one at a time. Use it where latency matters more than append throughput. Once no instance listens any more, drop the trigger with `DROP TRIGGER notify_subscriptions ON eventstore.events`.
+
+#### How it works
+
+- **Reading the store as a log.** `EventStore#read_log` returns events in the order of the transactions that appended them, and only up to `log_head`: the newest position before the oldest transaction still running (`pg_snapshot_xmin`). Event positions alone are taken at insert, not at commit, so a reader resuming after the last position it saw could skip an event that committed late. Reading up to the head never does. This is what `setup` adds the `transaction_id xid8` column and the `events_log_position_idx` index for.
+- **One instance per subscription.** Each instance takes Postgres session advisory locks, one per subscription, on one connection it keeps for that. If an instance dies, its connection goes and its locks with it, and another instance takes over within `rebalance_interval`. Instances record heartbeats in `eventstore.subscription_instances` and each takes `ceil(subscriptions / instances)`, so work spreads as instances come and go.
+- **Positions move by compare-and-set.** A position is only moved from the value the instance last saved. An instance that lost its lock, or a subscription reset meanwhile, finds it moved and rolls its work back instead of applying an event twice.
+- **Waking up.** Every instance polls `log_head` every `poll_interval`. With `listen_url`, a statement trigger on the events table also sends `NOTIFY crystal_es_events`, and listening instances wake at once.
+
+#### Requirements and limits
+
+- **Postgres 13 or later** for `read_log` (xid8). On older servers the event store works as before, without subscriptions.
+- **Session-mode connections.** The locks are session locks: don't run subscriptions through a pooler in transaction mode (PgBouncer `pool_mode = transaction`).
+- **Long transactions delay delivery.** The oldest writing transaction anywhere in the Postgres cluster holds the head back until it ends: a session idle in a transaction, a forgotten prepared transaction, a long migration in another database. Nothing is lost, but nothing is delivered past it either. Set `idle_in_transaction_session_timeout`, and monitor the age of the oldest transaction (`age(backend_xid)` in `pg_stat_activity`, and `pg_prepared_xacts`).
+- **Positions are transaction ids of the cluster.** Moving the store to another cluster with `pg_dump` or logical replication can bring transaction ids the new cluster hasn't reached yet. Reading the log then raises until the new cluster's transaction counter is past the highest stored `transaction_id`. `pg_upgrade` and physical replicas keep the counter and are not affected.
+- **An event whose key is missing is skipped.** As in `read` and replays, an event whose encryption key can't be found counts as erased: subscriptions log a warning and move past it. The key store raises the same error for a destroyed key and for one that never existed, so an instance started against the wrong or an empty key store skips every encrypted event. Check the key store configuration before starting subscriptions.
+- **`last_error` stores the exception class and the first line of the message** of a failing handler in `eventstore.subscriptions`, which `pg_monitor` can read. Later lines, where Postgres puts row values, are dropped. Don't put personal data in the first line of your own exceptions.
+- The in-memory event store implements all of this in the process, for specs. Every `ES::Subscriptions` on the same in-memory store shares its state, like instances sharing a database.
+
+#### Moving from the queue
+
+The [queue](#queue) and `EventBus#publish` keep working. Subscriptions replace them for delivering events:
+
+1. **Projections one at a time, no downtime.** Unsubscribe the projection from the queue consumer's bus and empty its table: the subscription fills it from the beginning. Or keep its rows and `configure(..., start: :now)` when no event can be in flight. Remove `init: true`.
+2. **Reactors together, in a short write pause.** Stop accepting commands for a moment, let the queue drain, start the subscriptions (reactors start `:now`), then accept commands again. Without a pause, an event appended during the switch could reach a reactor twice, or not at all.
+3. Remove the queue's trigger from `eventstore.events` once nothing consumes it.
+
 ---
 
 ### Event Store
@@ -338,6 +460,30 @@ bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 
 - **`ES::Adapters::EventStores::Postgres`** — stores events as JSONB rows with unique `(aggregate_id, version)` constraints. Provides a flattened view for stream queries and cursor-based pagination for batch replay.
 - **`ES::Adapters::EventStores::InMemory`** — lightweight implementation for tests.
+
+#### Transactions
+
+`transaction` runs a block in one transaction and yields an event store bound to it. Everything appended through that store commits when the block returns, or nothing does if it raises. Reads through it see its own appends:
+
+```crystal
+event_store.transaction do |store|
+  ReserveStockHandler.new(event_store: store).handle(reserve)
+  ChargePaymentHandler.new(event_store: store).handle(charge)
+end
+```
+
+On Postgres, each append runs in a savepoint, so a `Conflict` can be rescued inside the block and the transaction goes on. Only work done through the yielded store joins the transaction. Subscriptions run every reactor this way.
+
+#### Reading the store as a log
+
+`read_log(after, limit, handles: nil, partition: nil)` reads events in the order of the transactions that appended them, up to `log_head`, and is the one read that is safe to resume from a saved position (see [How it works](#how-it-works)). Each event carries its `log_position`, and the page's `last_position` is how far the read got, past events the filters left out:
+
+```crystal
+position = ES::EventStore::LogPosition::ZERO
+page = event_store.read_log(position, limit: 100, handles: [OrderPlaced.handle])
+page.events.each { |event| handle(event) }
+position = page.last_position
+```
 
 #### Querying by tag
 
@@ -485,7 +631,7 @@ event_store.append([StudentSubscribed.new(...)], model.condition)
 
 ### Queue
 
-`ES::Queue` provides asynchronous command processing. Two implementations:
+`ES::Queue` provides asynchronous command processing. For delivering events to reactors and projections across several instances, use [Subscriptions](#subscriptions) instead. Two implementations:
 
 - **`ES::Adapters::Queues::Postgres`** — durable queue backed by a PostgreSQL table.
 - **`ES::Adapters::Queues::InMemory`** — for tests and simple scenarios.
@@ -762,40 +908,39 @@ end
 
 ### 5. Define a Projection
 
+The ledger is declared `atomic: true` and writes through `write`, so each batch of events commits together with the projection's position and every event is booked exactly once (see [Subscriptions](#projections)).
+
 ```crystal
 # projections/ledger.cr
-define_projection("finance", "ledger") do
-  column :id,               UUID,   primary_key: true
-  column :transaction_id,   UUID
-  column :creditor_account, UUID
-  column :debtor_account,   UUID
-  column :amount,           Int64
-  column :accepted_at,      Time,   nullable: true
-  column :rejected_at,      Time,   nullable: true
+class Ledger < ES::Projection
+  include ES::ProjectionDSL
 
-  index [:transaction_id], unique: true
-
-  apply(TransactionInitiated) do |event|
-    db.exec(
-      "INSERT INTO finance.ledger (id, transaction_id, creditor_account, debtor_account, amount)
-       VALUES ($1, $2, $3, $4, $5)",
-      UUID.random, event.header.aggregate_id,
-      event.body.creditor_account, event.body.debtor_account, event.body.amount
-    )
+  define_projection "finance.ledger", atomic: true do
+    column :id,               UUID,  primary_key: true
+    column :creditor_account, UUID
+    column :debtor_account,   UUID
+    column :amount,           Int64
+    column :accepted_at,      Time,  null: true
+    column :rejected_at,      Time,  null: true
   end
 
-  apply(TransactionAccepted) do |event|
-    db.exec(
-      "UPDATE finance.ledger SET accepted_at = $1 WHERE transaction_id = $2",
-      Time.utc, event.header.aggregate_id
-    )
+  apply(TransactionInitiated) do
+    write do |connection|
+      connection.exec %(INSERT INTO "finance"."ledger" (id, creditor_account, debtor_account, amount) VALUES ($1, $2, $3, $4)),
+        aggregate_id, body.creditor_account, body.debtor_account, body.amount
+    end
   end
 
-  apply(TransactionRejected) do |event|
-    db.exec(
-      "UPDATE finance.ledger SET rejected_at = $1 WHERE transaction_id = $2",
-      Time.utc, event.header.aggregate_id
-    )
+  apply(TransactionAccepted) do
+    write do |connection|
+      connection.exec %(UPDATE "finance"."ledger" SET accepted_at = $1 WHERE id = $2), created_at, aggregate_id
+    end
+  end
+
+  apply(TransactionRejected) do
+    write do |connection|
+      connection.exec %(UPDATE "finance"."ledger" SET rejected_at = $1 WHERE id = $2), created_at, aggregate_id
+    end
   end
 end
 ```
@@ -809,38 +954,37 @@ require "pg"
 
 db = DB.open(ENV["DATABASE_URL"])
 
-ES::Config.configure do |c|
-  c.event_store    = ES::Adapters::EventStores::Postgres.new(db)
-  c.queue          = ES::Adapters::Queues::Postgres.new(db)
-  c.event_bus      = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
-  c.event_handlers = ES::EventHandlers.new
-end
-
-# Register event types for deserialization
+ES::Config.event_handlers = ES::EventHandlers.new
 ES::Config.event_handlers.register(TransactionInitiated)
 ES::Config.event_handlers.register(TransactionAccepted)
 ES::Config.event_handlers.register(TransactionRejected)
 
-# Subscribe reactors and projections to events
+ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
+ES::Config.event_store.setup
+
+ES::Config.projection_database = db
+Ledger.new.setup
+
+# The routing: which reactors and projections receive which events
+ES::Config.event_bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
 bus = ES::Config.event_bus
-bus.subscribe(TransactionInitiated, OnTransactionInitiated)
-bus.subscribe(TransactionInitiated, Ledger)
-bus.subscribe(TransactionAccepted,  Ledger)
-bus.subscribe(TransactionRejected,  Ledger)
+bus.subscribe(TransactionInitiated, [OnTransactionInitiated, Ledger])
+bus.subscribe(TransactionAccepted, Ledger)
+bus.subscribe(TransactionRejected, Ledger)
 
-# Initiate a transaction
-aggregate_id = UUID.random
-event = TransactionInitiated.new(
-  aggregate_id: aggregate_id,
-  body: TransactionInitiated::Body.new(
-    amount: 5_000_i64,
-    creditor_account: UUID.random,
-    debtor_account: UUID.random
-  )
-)
+# Deliver the events, on every instance of the application
+subscriptions = ES::Subscriptions.new
+subscriptions.start
+at_exit { subscriptions.stop }
 
-ES::Config.event_store.append(event)
-bus.publish(event)
+# Initiate a transaction. The reactor processes it, and the ledger books it.
+ES::Config.event_store.append(TransactionInitiated.new(
+  actor_id: nil,
+  command_handler: "example",
+  amount: 5_000_i64,
+  creditor_account: UUID.random,
+  debtor_account: UUID.random
+))
 ```
 
 ---

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.12.0
+
+### Added
+
+- **Subscriptions** (`ES::Subscriptions`) deliver events to every reactor and projection wired in the `EventBus`, so that several instances of an application can run side by side. Each handler follows the event store from its own saved position. Exactly one instance processes it at a time, and the instances share the handlers out between them through Postgres advisory locks and heartbeats. No broker is needed. A reactor runs in an event store transaction together with the move of its position, so it runs exactly once and its appends commit with it. An `atomic: true` projection applies a batch in one transaction of its own database together with its position. A failing handler is retried with backoff and paused after `max_attempts`, without stopping the others. Includes `configure` (partitions by aggregate, batch size, start position, projection database), `status`, `pause`, `resume`, `skip_failed_event`, `rebuild`, `reset` and `await`. See the README's Subscriptions section.
+- **`EventStore#read_log(after, limit, handles:, partition:)` and `#log_head`** read the store as a log, in the order of the appending transactions and only up to the oldest transaction still running. This is the one read that is safe to resume from a saved position: unlike `read(after:)`, it never skips an event that commits after a later one. Each event carries its `log_position`.
+- **`EventStore#transaction { |store| ... }`** runs a block in one transaction with an event store bound to it. Appends through that store commit together or not at all. On Postgres they run in savepoints, so a `Conflict` can be rescued inside the block.
+- **`define_projection(..., atomic: true)` and `Projection#write { |connection| ... }`**: a projection whose writes go through `write` commits them together with its subscription position.
+- `ES::SubscriptionStore`, with Postgres and in-memory adapters, keeps subscription positions, status, locks and instance heartbeats. Also new: `ES::ProjectionCheckpoints`, `ES::Exception::StaleCheckpoint`, `ES::Config.projection_database?` and `ES::Event#log_position`.
+
+### Changed
+
+- **The Postgres `setup` adds a `transaction_id xid8` column to `eventstore.events`**, with `pg_current_xact_id()` as its default, and the index `events_log_position_idx`. On Postgres 13 or later only; older servers keep working without `read_log`. Existing rows keep no transaction id and read as transaction 0, so no row is rewritten.
+- **In-memory event store:** appends now take turns with transactions. An append through the store itself from inside one of its own transactions raises instead of waiting forever.
+
+### Upgrading from 0.11.3
+
+- **Run `setup` once** on each existing Postgres event store. When the column is missing, it is added with an `ALTER TABLE` that doesn't rewrite the table but needs an exclusive lock: it waits for every transaction using the events table, and reads and appends arriving meanwhile queue behind it. `setup` therefore gives up after a 2-second lock timeout and tries 5 times. If the table stays busy, it logs a warning with the statements to run by hand and carries on: the store works as before, and only reading it as a log (subscriptions) refuses until the column exists. The index is then built `CONCURRENTLY`, like the indexes of 0.11.1. To keep boot short on a busy store, run them beforehand at a quiet moment: `ALTER TABLE "eventstore"."events" ADD COLUMN "transaction_id" xid8`, `ALTER TABLE "eventstore"."events" ALTER COLUMN "transaction_id" SET DEFAULT pg_current_xact_id()`, then the index from `LOG_POSITION_INDEX` with `CONCURRENTLY`.
+- **A store moved to another cluster** with `pg_dump` or logical replication must have the new cluster's transaction counter past its highest `transaction_id`; reading the log raises otherwise. `pg_upgrade` and physical replicas are not affected.
+- No code changes are needed to keep using the queue and `EventBus#publish`. To move to subscriptions, follow "Moving from the queue" in the README: projections one at a time, reactors together in a short write pause. Remove `init: true` from projections run by subscriptions.
+- `ES::Subscriptions.start` creates `eventstore.subscriptions`, `eventstore.subscription_instances`, and a `_crystal_es_projection_checkpoints` table in each projection schema. With `listen_url`, it also installs a statement trigger `notify_subscriptions` on `eventstore.events`. That trigger makes every append transaction send a notification, and Postgres commits such transactions one at a time, so it costs append throughput for every writer of the store. Subscriptions need session-mode connections (not PgBouncer in transaction mode) for their advisory locks.
+- New reserved names: `write`, `writing_on`, `self.atomic?` and `self.table_schema` in subclasses of `ES::Projection`; `log_position` in subclasses of `ES::Event`. A projection that defines its own `write` overrides the helper.
+- Custom event store adapters keep compiling. `read_log`, `log_head`, `transaction` and `subscription_store` raise `NotImplemented` until they implement them.
+
 ## 0.11.3
 
 ### Added

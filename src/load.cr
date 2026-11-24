@@ -17,6 +17,7 @@ require "./config.cr"
 # Event sourcing exceptions
 require "./exceptions/error.cr"
 require "./exceptions/conflict.cr"
+require "./exceptions/stale_checkpoint.cr"
 require "./exceptions/dependency_unavailable.cr"
 require "./exceptions/invalid_event_stream.cr"
 require "./exceptions/invalid_state.cr"
@@ -59,6 +60,13 @@ require "./components/encryption_key_manager.cr"
 require "./adapters/eventstores/eventstore.cr"
 require "./adapters/eventstores/in_memory.cr"
 require "./adapters/eventstores/postgres.cr"
+
+# Subscriptions: event delivery to reactors and projections across instances
+require "./components/subscriptions/subscription_store.cr"
+require "./adapters/subscription_stores/in_memory.cr"
+require "./adapters/subscription_stores/postgres.cr"
+require "./components/subscriptions/projection_checkpoints.cr"
+require "./components/subscriptions/subscriptions.cr"
 
 # # Queues
 require "./adapters/queues/queue.cr"

@@ -80,6 +80,11 @@ module ES
     getter header : Header
     getter body : Body
 
+    # Where the event sits in the store read as a log, when it was read that
+    # way: `ES::Subscriptions` sets it on the events it delivers. Lets a reactor
+    # wait for a projection to have processed the event (`Subscriptions#await`).
+    property log_position : ES::EventStore::LogPosition? = nil
+
     # Returns aggregate the event belongs to
     def self.aggregate
       @@type

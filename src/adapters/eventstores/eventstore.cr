@@ -226,8 +226,105 @@ module ES
       raise ES::Exception::InvalidState.new("limit must be at least 1, got #{limit}") if limit && limit < 1
     end
 
+    # The newest position `read_log` may return: every event at or before it
+    # belongs to a finished transaction, so nothing can still appear before it.
+    # `LogPosition::ZERO` for an empty store.
+    #
+    # Not abstract, so event store adapters written before subscriptions existed
+    # still compile; they raise when asked.
+    def log_head : LogPosition
+      raise ES::Exception::NotImplemented.new("#{self.class.name} does not support reading the store as a log")
+    end
+
+    # Reads the store as one log: the events after `after`, oldest first, up to
+    # `limit` of them, and never past `log_head`. This is what subscriptions
+    # follow, and the one read that is safe to resume from a saved position:
+    # positions come in transaction order, and an event only becomes readable
+    # once nothing can commit before it any more, so a reader never skips one.
+    #
+    # `handles` keeps only events of those types, `partition` (index, count)
+    # only those whose aggregate id hashes to that partition. The page's
+    # `last_position` is where the read got to, past any events the filters
+    # left out, so a reader can move on even when none of them matched.
+    #
+    # ```
+    # page = event_store.read_log(after: checkpoint, limit: 100, handles: [OrderPlaced.handle])
+    # page.events.each { |event| handle(event) }
+    # checkpoint = page.last_position
+    # ```
+    #
+    # An event whose encryption key was destroyed comes back header only,
+    # flagged `body_erased?`, like in `read`.
+    def read_log(after : LogPosition, limit : Int32 = 1000, handles : Array(String)? = nil, partition : {Int32, Int32}? = nil) : LogPage
+      raise ES::Exception::NotImplemented.new("#{self.class.name} does not support reading the store as a log")
+    end
+
+    # Runs the block in one transaction and yields an event store bound to it:
+    # every append made through that store commits when the block returns, or
+    # none does if it raises, and its reads see its own appends. Returns the
+    # block's value.
+    #
+    # ```
+    # event_store.transaction do |store|
+    #   ReserveStockHandler.new(event_store: store).handle(reserve)
+    #   ChargePaymentHandler.new(event_store: store).handle(charge)
+    # end
+    # ```
+    #
+    # Only work done through the yielded store joins the transaction. A command
+    # handler that falls back to `ES::Config.event_store` writes outside it.
+    def transaction(& : ES::EventStore -> T) : T forall T
+      raise ES::Exception::NotImplemented.new("#{self.class.name} does not support transactions")
+    end
+
+    # The store that coordinates `ES::Subscriptions` on top of this event store:
+    # positions, status, locks and the instances taking part. `listen_url` lets
+    # the Postgres one wake up on appends instead of polling.
+    def subscription_store(listen_url : String? = nil) : ES::SubscriptionStore
+      raise ES::Exception::NotImplemented.new("#{self.class.name} does not support subscriptions")
+    end
+
+    # Refuses log read options that have no sensible meaning
+    protected def validate_log_options(limit : Int32, partition : {Int32, Int32}?)
+      raise ES::Exception::InvalidState.new("limit must be at least 1, got #{limit}") if limit < 1
+      if part = partition
+        index, count = part
+        raise ES::Exception::InvalidState.new("partition count must be at least 1, got #{count}") if count < 1
+        raise ES::Exception::InvalidState.new("partition index must be in 0...#{count}, got #{index}") unless 0 <= index < count
+      end
+    end
+
     @encryption : ES::EncryptionKeyManager? = nil
     @tag_hasher : ES::TagHasher? = nil
+
+    # A place in the store read as a log (`read_log`). Positions order events by
+    # the transaction that appended them, then by their position within it.
+    # Unlike `Event#position`, they are safe to resume reading from.
+    struct LogPosition
+      include Comparable(LogPosition)
+
+      # The appending transaction; 0 for events stored before log positions existed
+      getter transaction_id : Int64
+      # The event's position (`Event#position`)
+      getter id : Int64
+
+      def initialize(@transaction_id : Int64, @id : Int64)
+      end
+
+      # Before the first event
+      ZERO = new(0_i64, 0_i64)
+
+      def <=>(other : LogPosition) : Int32
+        {transaction_id, id} <=> {other.transaction_id, other.id}
+      end
+
+      def to_s(io : IO) : Nil
+        io << transaction_id << ':' << id
+      end
+    end
+
+    # One page of `read_log`: the events read, and how far the read got
+    record LogPage, events : Array(Event), last_position : LogPosition
 
     struct Event
       getter header : JSON::Any
@@ -241,12 +338,16 @@ module ES
       # The header — type, tags, position — is intact; the body is JSON null.
       getter? body_erased : Bool
 
+      # Position of the event in the store read as a log, set by `read_log`
+      getter log_position : LogPosition?
+
       # Initialize Event with header and body
       def initialize(
         @header : JSON::Any,
         @body : JSON::Any,
         @position : Int64? = nil,
         @body_erased : Bool = false,
+        @log_position : LogPosition? = nil,
       )
       end
     end
@@ -328,14 +429,14 @@ module ES
     # key. A store always hands back plaintext, so nothing downstream has to know
     # that encryption exists. If the key was destroyed, `ES::Exception::NotFound`
     # raises straight through — the same as any other missing row.
-    protected def decode(header : JSON::Any, body : JSON::Any, position : Int64? = nil) : ES::EventStore::Event
+    protected def decode(header : JSON::Any, body : JSON::Any, position : Int64? = nil, log_position : LogPosition? = nil) : ES::EventStore::Event
       parsed_header = ES::Event::Header.from_json(header.to_json)
-      return ES::EventStore::Event.new(header, body, position) if parsed_header.encryption_key_id.nil?
+      return ES::EventStore::Event.new(header, body, position, log_position: log_position) if parsed_header.encryption_key_id.nil?
 
       encryption = @encryption
       raise ES::Exception::DependencyUnavailable.new("Event body is encrypted but this event store has no encryption configured") if encryption.nil?
 
-      ES::EventStore::Event.new(header, encryption.open(body, parsed_header), position)
+      ES::EventStore::Event.new(header, encryption.open(body, parsed_header), position, log_position: log_position)
     end
 
     # Same as #decode, but returns an event whose body was encrypted under a
@@ -346,10 +447,10 @@ module ES
     # The key store raises the same `NotFound` for a key that was destroyed and
     # one that never existed in this environment, so a misconfigured key store
     # also reads as erased here.
-    protected def decode_or_erase(header : JSON::Any, body : JSON::Any, position : Int64? = nil) : ES::EventStore::Event
-      decode(header, body, position)
+    protected def decode_or_erase(header : JSON::Any, body : JSON::Any, position : Int64? = nil, log_position : LogPosition? = nil) : ES::EventStore::Event
+      decode(header, body, position, log_position)
     rescue ES::Exception::NotFound
-      ES::EventStore::Event.new(header, JSON::Any.new(nil), position, body_erased: true)
+      ES::EventStore::Event.new(header, JSON::Any.new(nil), position, body_erased: true, log_position: log_position)
     end
 
     # Same as #decode, but tolerates a body encrypted under a key that has since
