@@ -3,7 +3,10 @@ class Projections::Ledger < ES::Projection
 
   TECHNICAL_ACCOUNT = UUID.new("01929fef-2e55-742f-b151-000000acc000")
 
-  define_projection "projections.postings", init: true do
+  # `atomic: true`: every write goes through `write`, so ES::Subscriptions
+  # commits the postings of a batch together with the ledger's position and
+  # each event is booked exactly once.
+  define_projection "projections.postings", atomic: true do
     column :id, Int32, serial: true, primary_key: true
     column :posting_uuid, UUID, null: false
     column :transaction_uuid, UUID, null: false
@@ -141,9 +144,10 @@ class Projections::Ledger < ES::Projection
     creditor_amount_value = amount_value # Amount that is posted on creditor side
     debtor_amount_value = -amount_value  # Amount that is posted on debtor side
 
-    @projection_database.transaction do |tx|
-      cnn = tx.connection
-      prepared_statement = cnn.build(%(
+    # Both legs of the posting are written in one transaction: the batch's
+    # transaction under a subscription, a transaction of its own otherwise
+    write do |connection|
+      prepared_statement = connection.build(%(
                 INSERT INTO "projections"."postings" (
                   accepted_at,
                   account_credit_uuid,

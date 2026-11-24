@@ -50,10 +50,6 @@ ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
 store = ES::Config.event_store
 store.setup
 
-# Initialize queue
-queue = ES::QueueAdapters::Postgres.new("default", db)
-store.setup
-
 # Intialize projection database
 ES::Config.projection_database = db
 
@@ -73,38 +69,25 @@ bus.subscribe(Events::TransactionInitiated, [
 ])
 bus.subscribe(Events::TransactionRejected, Projections::Ledger)
 
-def process_queue(
-  queue : ES::Queue,
-  store : ES::EventStore,
-  event_handlers : ES::EventHandlers,
-  event_bus : ES::EventBus,
-)
-  channel = queue.listen
-
-  loop do
-    message = channel.receive
-
-    es_event = store.fetch_event(message.header.event_id)
-    h = ES::Event::Header.from_json(es_event.header.to_json)
-    event = event_handlers.event_class(h.event_handle).new(h, es_event.body)
-
-    if event_bus.publish(event)
-      queue.archive(message.msg_id)
-    end
-  end
-end
-
-spawn process_queue(queue, store, event_handlers, bus)
+# Deliver the events to the reactor and the projection wired above. Start as
+# many instances of this example as you like: each subscription runs on exactly
+# one of them at a time, and they share the work. The reactor runs exactly once
+# per event, and the Ledger (`atomic: true`) applies each event exactly once.
+# Pass `listen_url:` to react the moment an event is appended instead of at the
+# next poll (every second).
+subscriptions = ES::Subscriptions.new
+subscriptions.start
+at_exit { subscriptions.stop }
 
 # Parse the for the setup flag
 OptionParser.parse do |parser|
   parser.banner = "Welcome to transaction example of the crystal-es lib!"
 
-  parser.on "-s", "--setup", "Setup eventstore and queue " do
+  parser.on "-s", "--setup", "Setup eventstore and subscriptions" do
     puts "Initializing event store..."
     store.setup
-    puts "Initializing queue..."
-    queue.setup
+    puts "Initializing subscriptions..."
+    subscriptions.setup
     puts "Done!"
     exit
   end
@@ -130,6 +113,14 @@ enc_key_id = UUID.new(encryption.create_key)
   )
 
   store.append(event)
+end
+
+# Wait for the reactor to process the transactions, then for the ledger to
+# apply what the reactor appended. Any instance can wait: the positions are shared.
+subscriptions.await(Reactors::OnTransactionInitiated, store.log_head, timeout: 30.seconds)
+subscriptions.await(Projections::Ledger, store.log_head, timeout: 30.seconds)
+subscriptions.status.each do |status|
+  puts "#{status.name}: #{status.status}, #{status.caught_up? ? "caught up" : "behind"}"
 end
 
 puts "Press any key to exit"

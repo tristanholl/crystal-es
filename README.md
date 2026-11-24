@@ -908,40 +908,39 @@ end
 
 ### 5. Define a Projection
 
+The ledger is declared `atomic: true` and writes through `write`, so each batch of events commits together with the projection's position and every event is booked exactly once (see [Subscriptions](#projections)).
+
 ```crystal
 # projections/ledger.cr
-define_projection("finance", "ledger") do
-  column :id,               UUID,   primary_key: true
-  column :transaction_id,   UUID
-  column :creditor_account, UUID
-  column :debtor_account,   UUID
-  column :amount,           Int64
-  column :accepted_at,      Time,   nullable: true
-  column :rejected_at,      Time,   nullable: true
+class Ledger < ES::Projection
+  include ES::ProjectionDSL
 
-  index [:transaction_id], unique: true
-
-  apply(TransactionInitiated) do |event|
-    db.exec(
-      "INSERT INTO finance.ledger (id, transaction_id, creditor_account, debtor_account, amount)
-       VALUES ($1, $2, $3, $4, $5)",
-      UUID.random, event.header.aggregate_id,
-      event.body.creditor_account, event.body.debtor_account, event.body.amount
-    )
+  define_projection "finance.ledger", atomic: true do
+    column :id,               UUID,  primary_key: true
+    column :creditor_account, UUID
+    column :debtor_account,   UUID
+    column :amount,           Int64
+    column :accepted_at,      Time,  null: true
+    column :rejected_at,      Time,  null: true
   end
 
-  apply(TransactionAccepted) do |event|
-    db.exec(
-      "UPDATE finance.ledger SET accepted_at = $1 WHERE transaction_id = $2",
-      Time.utc, event.header.aggregate_id
-    )
+  apply(TransactionInitiated) do
+    write do |connection|
+      connection.exec %(INSERT INTO "finance"."ledger" (id, creditor_account, debtor_account, amount) VALUES ($1, $2, $3, $4)),
+        aggregate_id, body.creditor_account, body.debtor_account, body.amount
+    end
   end
 
-  apply(TransactionRejected) do |event|
-    db.exec(
-      "UPDATE finance.ledger SET rejected_at = $1 WHERE transaction_id = $2",
-      Time.utc, event.header.aggregate_id
-    )
+  apply(TransactionAccepted) do
+    write do |connection|
+      connection.exec %(UPDATE "finance"."ledger" SET accepted_at = $1 WHERE id = $2), created_at, aggregate_id
+    end
+  end
+
+  apply(TransactionRejected) do
+    write do |connection|
+      connection.exec %(UPDATE "finance"."ledger" SET rejected_at = $1 WHERE id = $2), created_at, aggregate_id
+    end
   end
 end
 ```
@@ -955,38 +954,37 @@ require "pg"
 
 db = DB.open(ENV["DATABASE_URL"])
 
-ES::Config.configure do |c|
-  c.event_store    = ES::Adapters::EventStores::Postgres.new(db)
-  c.queue          = ES::Adapters::Queues::Postgres.new(db)
-  c.event_bus      = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
-  c.event_handlers = ES::EventHandlers.new
-end
-
-# Register event types for deserialization
+ES::Config.event_handlers = ES::EventHandlers.new
 ES::Config.event_handlers.register(TransactionInitiated)
 ES::Config.event_handlers.register(TransactionAccepted)
 ES::Config.event_handlers.register(TransactionRejected)
 
-# Subscribe reactors and projections to events
+ES::Config.event_store = ES::EventStoreAdapters::Postgres.new(db)
+ES::Config.event_store.setup
+
+ES::Config.projection_database = db
+Ledger.new.setup
+
+# The routing: which reactors and projections receive which events
+ES::Config.event_bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
 bus = ES::Config.event_bus
-bus.subscribe(TransactionInitiated, OnTransactionInitiated)
-bus.subscribe(TransactionInitiated, Ledger)
-bus.subscribe(TransactionAccepted,  Ledger)
-bus.subscribe(TransactionRejected,  Ledger)
+bus.subscribe(TransactionInitiated, [OnTransactionInitiated, Ledger])
+bus.subscribe(TransactionAccepted, Ledger)
+bus.subscribe(TransactionRejected, Ledger)
 
-# Initiate a transaction
-aggregate_id = UUID.random
-event = TransactionInitiated.new(
-  aggregate_id: aggregate_id,
-  body: TransactionInitiated::Body.new(
-    amount: 5_000_i64,
-    creditor_account: UUID.random,
-    debtor_account: UUID.random
-  )
-)
+# Deliver the events, on every instance of the application
+subscriptions = ES::Subscriptions.new
+subscriptions.start
+at_exit { subscriptions.stop }
 
-ES::Config.event_store.append(event)
-bus.publish(event)
+# Initiate a transaction. The reactor processes it, and the ledger books it.
+ES::Config.event_store.append(TransactionInitiated.new(
+  actor_id: nil,
+  command_handler: "example",
+  amount: 5_000_i64,
+  creditor_account: UUID.random,
+  debtor_account: UUID.random
+))
 ```
 
 ---
