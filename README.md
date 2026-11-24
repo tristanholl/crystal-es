@@ -49,7 +49,7 @@ See the [changelog](./CHANGELOG.md) for upgrade notes between versions.
 | [Dynamic consistency boundaries](docs/consistency.md) | Querying by tag, tag versions, conditional appends, decision projections |
 | [Payload encryption](docs/encryption.md) | Encrypted bodies, erasure by key destruction, what is and isn't protected |
 | [Configuration](docs/configuration.md) | `ES::Config` and the queue |
-| [Project structure](docs/project-structure.md) | A vertical-slice layout for larger applications |
+| [Recommended project structure](docs/recommended-project-structure.md) | Organizing an application by domain: folders, naming, boundaries between domains, wiring, specs |
 
 ---
 
