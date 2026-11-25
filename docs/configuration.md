@@ -3,15 +3,17 @@
 `ES::Config` is a global singleton that wires dependencies together:
 
 ```crystal
-ES::Config.event_handlers      = ES::EventHandlers.new
-ES::Config.encryption          = ES::EncryptionKeyManager.new(key_store, application_key) # optional
-ES::Config.tag_hasher          = ES::TagHasher.new(application_key)                        # optional
-ES::Config.event_store         = ES::EventStoreAdapters::Postgres.new(db)
-ES::Config.projection_database = db
-ES::Config.event_bus           = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
+ES::Config.configure do |config|
+  config.event_handlers      = ES::EventHandlers.new
+  config.encryption          = ES::EncryptionKeyManager.new(key_store, application_key) # optional
+  config.tag_hasher          = ES::TagHasher.new(application_key)                        # optional
+  config.event_store         = ES::EventStoreAdapters::Postgres.new(db)
+  config.projection_database = db
+  config.event_bus           = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
+end
 ```
 
-Set `encryption` and `tag_hasher` before creating the event store, which picks them up from `ES::Config`.
+The block only groups the setters, and each one works on its own too (`ES::Config.event_store = ...`). Order matters either way, because components read `ES::Config` when they're created: set `encryption` and `tag_hasher` before creating the event store, and `event_handlers` and `event_store` before creating the event bus.
 
 `encryption` is optional; leaving it unset behaves exactly as it did before payload
 encryption existed. `tag_hasher` is optional too; it is only needed by events that
