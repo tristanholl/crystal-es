@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.3
+
+### Added
+
+- **A subscription store can keep its state in another database than the events and still listen to them.** `ES::SubscriptionStoreAdapters::Postgres.new(db, listen_url:)` keeps its tables in `db` (schema `eventstore`). Its `setup` now installs the notification trigger in the database `listen_url` names, the one the events are in, instead of in `db`.
+  - This lets projections keep their subscription state next to their tables while still being woken the moment events are appended. Several projection databases can then be filled with the same projections from one event store.
+  - Only a store whose own database has no events table installs the trigger through `listen_url`. Such a store failed in `setup` before.
+  - It runs no DDL there when the trigger exists already, so the role of `listen_url` needs no more than `CONNECT` once the trigger is installed. Otherwise it needs to create it, as the store's own role did before.
+  - Without an events table in that database either, `setup` fails with the same Postgres error as before.
+  - A store next to the events installs the trigger as before: in the same transaction as its tables, through its own connection.
+- **`SubscriptionStore#same_database?(event_store)`** tells whether a store keeps its state in the event store's database, nil if it can't tell.
+  - The base returns nil.
+  - The Postgres store compares the two databases. It answers false for an in-memory event store and nil for any other that isn't Postgres.
+  - The in-memory store answers true for an in-memory event store and false for a Postgres one.
+- **Reactors with a store not next to the events are refused.** `ES::Subscriptions#start` and `#catch_up` raise for them, since a reactor's position moves in the event store's transaction. That covers a Postgres store in another database than the events, and a store of one kind with an event store of the other. Before, such a setup retried its reactors without moving them, or paused them.
+  - A `kinds: :projections` instance with its store elsewhere runs. It leaves the reactors' state alone: it creates no starting positions for them, and refuses `pause`, `resume`, `skip_failed_event` and `reset` for a reactor.
+  - See "Projections' state next to their database" in [docs/subscriptions.md](./docs/subscriptions.md#projections-state-next-to-their-database).
+
+### Upgrading from 0.12.2
+
+- No changes needed for setups whose reactors ran. A spec suite that pairs an in-memory subscription store with a Postgres event store (or the reverse) and wires a reactor it never triggers now gets `ES::Exception::InvalidState` from `start` or `catch_up`: use the event store's own store (`event_store.subscription_store`), or `kinds: :projections`.
+
 ## 0.12.2
 
 ### Added

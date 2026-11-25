@@ -126,6 +126,15 @@ module ES
         end
       end
 
+      # Its state lives in the process, next to any in-memory event store;
+      # never next to a Postgres one, whose transactions can't move it
+      def same_database?(event_store : ES::EventStore) : Bool?
+        case event_store
+        when ES::EventStoreAdapters::InMemory, ES::EventStoreAdapters::InMemory::Bound then true
+        when ES::EventStoreAdapters::Postgres                                          then false
+        end
+      end
+
       def leave(instance_id : String) : Nil
         @mutex.synchronize do
           @instances.delete(instance_id)

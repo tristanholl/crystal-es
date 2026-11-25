@@ -163,6 +163,13 @@ module PostgresSubscriptionStoreSpec
     @@db ||= DB.open(URL || raise "ES_TEST_DATABASE_URL is not set")
   end
 
+  # The test server's URL, naming another database on it
+  def self.url_of(database : String) : String
+    uri = URI.parse(URL || raise "ES_TEST_DATABASE_URL is not set")
+    uri.path = "/#{database}"
+    uri.to_s
+  end
+
   def self.fresh : {ES::EventStoreAdapters::Postgres, ES::SubscriptionStoreAdapters::Postgres}
     db.exec %(DROP SCHEMA IF EXISTS "eventstore" CASCADE)
     events = ES::EventStoreAdapters::Postgres.new(db, nil, nil)
@@ -236,6 +243,53 @@ describe ES::SubscriptionStoreAdapters::Postgres do
       store.try_lock("reactor:A").should be_false
       other.close
       store.close
+    end
+
+    it "listens to the events from a store whose state is in another database" do
+      events, _ = PostgresSubscriptionStoreSpec.fresh
+      PostgresSubscriptionStoreSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_state" WITH (FORCE))
+      PostgresSubscriptionStoreSpec.db.exec %(CREATE DATABASE "es_test_state")
+      state_db = DB.open(PostgresSubscriptionStoreSpec.url_of("es_test_state"))
+      begin
+        state_db.exec %(CREATE SCHEMA "eventstore")
+        store = ES::SubscriptionStoreAdapters::Postgres.new(state_db, listen_url: PostgresSubscriptionStoreSpec::URL)
+        store.setup
+
+        # The trigger is on the events, not in the state's database
+        PostgresSubscriptionStoreSpec.db.query_one(%(SELECT EXISTS (SELECT FROM pg_trigger WHERE tgname = 'notify_subscriptions')), as: Bool).should be_true
+        state_db.query_one(%(SELECT EXISTS (SELECT FROM pg_trigger WHERE tgname = 'notify_subscriptions')), as: Bool).should be_false
+        state_db.query_one(%(SELECT to_regclass('"eventstore"."subscriptions"') IS NOT NULL), as: Bool).should be_true
+        sleep 100.milliseconds
+
+        spawn do
+          sleep 50.milliseconds
+          events.append(happened)
+        end
+        started = Time.utc
+        store.wait_for_appends(5.seconds)
+        (Time.utc - started).should be < 2.seconds
+        store.close
+      ensure
+        state_db.close
+        PostgresSubscriptionStoreSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_state" WITH (FORCE))
+      end
+    end
+
+    it "refuses to listen to a database without events" do
+      PostgresSubscriptionStoreSpec.fresh
+      PostgresSubscriptionStoreSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_state" WITH (FORCE))
+      PostgresSubscriptionStoreSpec.db.exec %(CREATE DATABASE "es_test_state")
+      state_url = PostgresSubscriptionStoreSpec.url_of("es_test_state")
+      state_db = DB.open(state_url)
+      begin
+        state_db.exec %(CREATE SCHEMA "eventstore")
+        store = ES::SubscriptionStoreAdapters::Postgres.new(state_db, listen_url: state_url)
+        expect_raises(PQ::PQError, /eventstore.events/) { store.setup }
+        store.close
+      ensure
+        state_db.close
+        PostgresSubscriptionStoreSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_state" WITH (FORCE))
+      end
     end
 
     it "wakes a waiting subscriber on append when listening" do
