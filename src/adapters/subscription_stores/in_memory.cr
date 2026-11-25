@@ -7,6 +7,8 @@ module ES
       @states = {} of String => ES::SubscriptionStore::State
       @locks = {} of String => Fiber
       @instances = {} of String => Time
+      # The kinds each instance processes; one without an entry processes all
+      @instance_kinds = {} of String => Array(String)
       @mutex = Mutex.new
 
       def setup : Nil
@@ -98,12 +100,37 @@ module ES
         @mutex.synchronize do
           now = Time.utc
           @instances[instance_id] = now
+          forget_dead_instances(now, ttl)
           @instances.count { |_, seen| now - seen <= ttl }
         end
       end
 
+      def heartbeat(instance_id : String, ttl : Time::Span, kinds : Array(String)) : Array(Array(String)?)
+        # Refused like the Postgres store does, which sends them as one list
+        raise ES::Exception::InvalidState.new("kinds must be plain lower-case words, got #{kinds}") if kinds.empty? || !kinds.all?(&.matches?(/\A[a-z_]+\z/))
+
+        @mutex.synchronize do
+          now = Time.utc
+          @instances[instance_id] = now
+          @instance_kinds[instance_id] = kinds.dup
+          forget_dead_instances(now, ttl)
+          @instances.select { |_, seen| now - seen <= ttl }.keys.map { |id| @instance_kinds[id]?.try(&.dup) }
+        end
+      end
+
+      # Instances that died without leaving, like the Postgres store does
+      private def forget_dead_instances(now : Time, ttl : Time::Span) : Nil
+        @instances.select { |_, seen| now - seen > ttl * 10 }.each_key do |id|
+          @instances.delete(id)
+          @instance_kinds.delete(id)
+        end
+      end
+
       def leave(instance_id : String) : Nil
-        @mutex.synchronize { @instances.delete(instance_id) }
+        @mutex.synchronize do
+          @instances.delete(instance_id)
+          @instance_kinds.delete(instance_id)
+        end
       end
 
       def wait_for_appends(timeout : Time::Span) : Nil

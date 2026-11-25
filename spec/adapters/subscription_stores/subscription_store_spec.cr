@@ -118,6 +118,28 @@ private def store_scenarios(&build : -> {ES::EventStore, ES::SubscriptionStore})
     store.leave("one")
     store.heartbeat("two", 1.minute).should eq(1)
   end
+
+  it "lists the kinds of the instances alive, nil for one recorded without kinds" do
+    _, store = build.call
+    listed = ->(kinds : Array(Array(String)?)) { kinds.map { |each| each.try(&.join('+')) || "all" }.sort! }
+
+    listed.call(store.heartbeat("reactors", 1.minute, ["reactor"])).should eq(["reactor"])
+    listed.call(store.heartbeat("projections", 1.minute, ["projection"])).should eq(["projection", "reactor"])
+    listed.call(store.heartbeat("both", 1.minute, ["reactor", "projection"])).should eq(["projection", "reactor", "reactor+projection"])
+    store.heartbeat("earlier", 1.minute).should eq(4)
+    listed.call(store.heartbeat("reactors", 1.minute, ["reactor"])).should eq(["all", "projection", "reactor", "reactor+projection"])
+
+    store.leave("earlier")
+    store.leave("both")
+    listed.call(store.heartbeat("projections", 1.minute, ["projection"])).should eq(["projection", "reactor"])
+  end
+
+  it "refuses kinds that aren't plain words" do
+    _, store = build.call
+
+    expect_raises(ES::Exception::InvalidState, /plain lower-case words/) { store.heartbeat("one", 1.minute, ["reactor,projection"]) }
+    expect_raises(ES::Exception::InvalidState, /plain lower-case words/) { store.heartbeat("one", 1.minute, [] of String) }
+  end
 end
 
 describe ES::SubscriptionStoreAdapters::InMemory do
@@ -167,6 +189,16 @@ describe ES::SubscriptionStoreAdapters::Postgres do
       listening.setup
       trigger.call.should be_true
       listening.close
+      store.close
+    end
+
+    it "adds the kinds of instances to a store set up by an earlier version" do
+      _, store = PostgresSubscriptionStoreSpec.fresh
+      PostgresSubscriptionStoreSpec.db.exec %(ALTER TABLE "eventstore"."subscription_instances" DROP COLUMN "kinds")
+      store.heartbeat("earlier", 1.minute).should eq(1)
+
+      store.setup
+      store.heartbeat("later", 1.minute, ["reactor"]).should eq([nil, ["reactor"]])
       store.close
     end
 

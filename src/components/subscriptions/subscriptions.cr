@@ -35,6 +35,14 @@ module ES
 
     alias Handler = ES::Reactor.class | ES::Projection.class
 
+    # The kinds of subscription an instance processes: an application may run
+    # its reactors and its projections in separate instances
+    @[Flags]
+    enum Kinds
+      Reactors
+      Projections
+    end
+
     private alias LogPosition = ES::EventStore::LogPosition
 
     # How often a subscription that only skips over events of other types
@@ -100,6 +108,11 @@ module ES
         @handler.is_a?(ES::Reactor.class)
       end
 
+      # As recorded with the heartbeats, and the prefix of the name
+      def kind : String
+        reactor? ? "reactor" : "projection"
+      end
+
       def partition_filter : {Int32, Int32}?
         @partitions > 1 ? {@partition, @partitions} : nil
       end
@@ -142,6 +155,16 @@ module ES
     #   instances again, and to notice a pause or reset made elsewhere
     # - `max_attempts`, `retry_base_delay`, `retry_max_delay`: retries of a
     #   failing handler, with exponential backoff, before it is paused
+    # - `kinds`: which subscriptions this instance processes, `:reactors`,
+    #   `:projections` or both (the default). Instances share each kind out
+    #   among those that process it. Every handler in the bus stays known, so
+    #   `await`, `status` and the operations work for all of them; the bus
+    #   should be the same in every instance.
+    #
+    # ```
+    # # An instance that only runs reactors, next to others that run projections
+    # subscriptions = ES::Subscriptions.new(kinds: :reactors)
+    # ```
     def initialize(
       @bus : ES::EventBus(Handler) = ES::Config.event_bus,
       @event_store : ES::EventStore = ES::Config.event_store,
@@ -155,8 +178,10 @@ module ES
       @retry_base_delay : Time::Span = 1.second,
       @retry_max_delay : Time::Span = 5.minutes,
       @instance_id : String = UUID.v7.to_s,
+      @kinds : Kinds = Kinds::All,
     )
       raise ES::Exception::InvalidState.new("max_attempts must be at least 1, got #{@max_attempts}") if @max_attempts < 1
+      raise ES::Exception::InvalidState.new("kinds must name reactors, projections or both") if @kinds == Kinds::None
       @store = store || @event_store.subscription_store(listen_url)
     end
 
@@ -207,6 +232,9 @@ module ES
         raise ES::Exception::InvalidState.new("Subscriptions were stopped") if @stopping
 
         prepare
+        # Raises at once if the store can't tell the kinds apart, instead of
+        # in every rebalance
+        live_instances unless @kinds == Kinds::All
         @started = true
       end
 
@@ -273,7 +301,7 @@ module ES
         # Another round as long as one moved: a reactor may have appended
         # events for a subscription that already had its turn
         loop do
-          moved = units.map { |unit| catch_up(unit, deadline, timeout) }
+          moved = own_units.map { |unit| catch_up(unit, deadline, timeout) }
           break unless moved.any?(&.itself)
         end
       end
@@ -384,10 +412,14 @@ module ES
     end
 
     # Creates what the subscriptions need and gives new ones their starting
-    # position
+    # position. Every instance does so for every reactor, so a new reactor
+    # starts when the first instance of the release does, not when one that
+    # runs reactors comes up later. A projection gets its position on an
+    # instance that processes projections, where it is checked against its
+    # table.
     private def prepare : Nil
       setup
-      units.group_by(&.handler).each { |handler, handler_units| create_positions(handler, handler_units) }
+      units.select { |unit| unit.reactor? || processes?(unit) }.group_by(&.handler).each { |handler, handler_units| create_positions(handler, handler_units) }
     end
 
     # Processes one subscription up to the head; true if it moved
@@ -423,6 +455,22 @@ module ES
 
     private def units : Array(Unit)
       @units ||= build_units
+    end
+
+    # The subscriptions of the kinds this instance processes
+    private def own_units : Array(Unit)
+      units.select { |unit| processes?(unit) }
+    end
+
+    private def processes?(unit : Unit) : Bool
+      unit.reactor? ? @kinds.reactors? : @kinds.projections?
+    end
+
+    private def kind_names : Array(String)
+      names = [] of String
+      names << "reactor" if @kinds.reactors?
+      names << "projection" if @kinds.projections?
+      names
     end
 
     private def units_for(handler : Handler) : Array(Unit)
@@ -578,16 +626,20 @@ module ES
           units.select(&.owned?).each { |unit| release(unit, unlock: false) }
         end
 
-        live = Math.max(@store.heartbeat(@instance_id, @rebalance_interval * 3), 1)
-        share = (units.size + live - 1) // live
-        owned = units.select(&.owned?)
+        live = live_instances
+        if live.includes?(nil) && !live.all? { |kinds| processes_all?(kinds) }
+          Log.warn { "An instance that records no kinds (crystal-es 0.12.1 or earlier) runs next to instances that process only some kinds: it takes less than its share, and some subscriptions may be left without an instance until it is upgraded" }
+        end
 
-        if owned.size > share
-          owned.last(owned.size - share).each { |unit| release(unit) }
+        if live.all? { |kinds| processes_all?(kinds) }
+          # Every instance processes every kind: all are shared out together
+          share_out(units, live.size)
         else
-          units.reject(&.owned?).shuffle!.each do |unit|
-            break if units.count(&.owned?) >= share
-            acquire(unit) if @store.try_lock(unit.name)
+          # Each kind among the instances that process it, so an instance that
+          # runs only reactors takes all of them when it is the only one,
+          # however many run projections
+          kind_names.each do |kind|
+            share_out(units.select { |unit| unit.kind == kind }, live.count { |kinds| kinds.nil? || kinds.includes?(kind) })
           end
         end
 
@@ -595,6 +647,41 @@ module ES
       end
     rescue ex
       Log.error(exception: ex) { "Rebalancing subscriptions failed" }
+    end
+
+    # Takes this instance's share of `pool` among `instances`, or gives the
+    # excess up
+    private def share_out(pool : Array(Unit), instances : Int32) : Nil
+      instances = Math.max(instances, 1)
+      share = (pool.size + instances - 1) // instances
+      owned = pool.select(&.owned?)
+
+      if owned.size > share
+        owned.last(owned.size - share).each { |unit| release(unit) }
+      else
+        pool.reject(&.owned?).shuffle!.each do |unit|
+          break if pool.count(&.owned?) >= share
+          acquire(unit) if @store.try_lock(unit.name)
+        end
+      end
+    end
+
+    # The kinds of every instance alive, nil for one that processes every
+    # kind. A store written for an earlier version can't tell them apart,
+    # which is fine as long as every instance processes every kind.
+    private def live_instances : Array(Array(String)?)
+      ttl = @rebalance_interval * 3
+      begin
+        @store.heartbeat(@instance_id, ttl, kind_names)
+      rescue ex : ES::Exception::NotImplemented
+        raise ex unless @kinds == Kinds::All
+
+        Array(Array(String)?).new(Math.max(@store.heartbeat(@instance_id, ttl), 1), nil)
+      end
+    end
+
+    private def processes_all?(kinds : Array(String)?) : Bool
+      kinds.nil? || (kinds.includes?("reactor") && kinds.includes?("projection"))
     end
 
     private def acquire(unit : Unit) : Nil
