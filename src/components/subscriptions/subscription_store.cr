@@ -106,6 +106,15 @@ module ES
       raise ES::Exception::NotImplemented.new("#{self.class.name} can't record which kinds of subscription an instance processes, so every instance must process all of them")
     end
 
+    # Whether the store keeps its state in the database of `event_store`, nil
+    # if it can't tell. A reactor's position moves in the event store's
+    # transaction, so reactors need a store there; projections don't.
+    #
+    # Not abstract, so stores written for earlier versions keep compiling
+    def same_database?(event_store : ES::EventStore) : Bool?
+      nil
+    end
+
     # Removes an instance that stops
     abstract def leave(instance_id : String) : Nil
 

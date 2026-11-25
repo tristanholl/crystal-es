@@ -128,6 +128,25 @@ module PostgresSubscriptionsSpec
     )
   end
 
+  # Projections with their state in another database than the events, woken
+  # by listening to the events' database
+  def self.projections_elsewhere(store : ES::EventStore, bus, state_db : DB::Database) : ES::Subscriptions
+    ES::Subscriptions.new(
+      bus: bus, event_store: store, event_handlers: handlers, projection_database: db,
+      store: ES::SubscriptionStoreAdapters::Postgres.new(state_db, listen_url: URL),
+      poll_interval: 30.seconds, rebalance_interval: 30.seconds,
+      max_attempts: 2, retry_base_delay: 1.millisecond, retry_max_delay: 5.milliseconds,
+      kinds: :projections,
+    )
+  end
+
+  # The test server's URL, naming another database on it
+  def self.url_of(database : String) : String
+    uri = URI.parse(URL || raise "ES_TEST_DATABASE_URL is not set")
+    uri.path = "/#{database}"
+    uri.to_s
+  end
+
   def self.placed(number : Int32) : SubPgPlaced
     SubPgPlaced.new(actor_id: nil, command_handler: "test", number: number)
   end
@@ -304,6 +323,75 @@ describe "ES::Subscriptions on Postgres" do
     ensure
       first.try(&.stop)
       second.try(&.stop)
+    end
+
+    it "keeps the projections' state in another database, woken by the events' database" do
+      store = PostgresSubscriptionsSpec.fresh
+      PostgresSubscriptionsSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_projection_state" WITH (FORCE))
+      PostgresSubscriptionsSpec.db.exec %(CREATE DATABASE "es_test_projection_state")
+      state_db = DB.open(PostgresSubscriptionsSpec.url_of("es_test_projection_state"))
+      state_db.exec %(CREATE SCHEMA "eventstore")
+      bus = PostgresSubscriptionsSpec.bus(store, SubPgShipOrder, SubPgOrdersAtomic)
+      # One instance running both kinds: reactors with their state next to
+      # the events (their appends commit with their position), projections
+      # with theirs elsewhere
+      reacting = PostgresSubscriptionsSpec.subscriptions(store, bus, listen: true, kinds: :reactors)
+      projecting = PostgresSubscriptionsSpec.projections_elsewhere(store, bus, state_db)
+      reacting.start
+      projecting.start
+      PostgresSubscriptionsSpec.eventually { reacting.status.count(&.owned?) == 1 && projecting.status.count(&.owned?) == 1 }
+
+      (1..3).each { |number| store.append(PostgresSubscriptionsSpec.placed(number)) }
+      # Woken, not polled: the poll interval is 30 seconds
+      reacting.await(SubPgOrdersAtomic, store.log_head, timeout: 5.seconds).should be_true
+      PostgresSubscriptionsSpec.numbers("orders_atomic").should eq([1, 2, 3])
+      PostgresSubscriptionsSpec.eventually { SubPgShipOrder.seen.size >= 3 }
+
+      state_db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscriptions" WHERE name = 'projection:SubPgOrdersAtomic'), as: Int32).should eq(1)
+      PostgresSubscriptionsSpec.db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscriptions" WHERE name = 'projection:SubPgOrdersAtomic'), as: Int32).should eq(0)
+    ensure
+      reacting.try(&.stop)
+      projecting.try(&.stop)
+      state_db.try(&.close)
+      PostgresSubscriptionsSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_projection_state" WITH (FORCE))
+    end
+
+    it "refuses reactors with a store in another database than the events" do
+      store = PostgresSubscriptionsSpec.fresh
+      PostgresSubscriptionsSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_projection_state" WITH (FORCE))
+      PostgresSubscriptionsSpec.db.exec %(CREATE DATABASE "es_test_projection_state")
+      state_db = DB.open(PostgresSubscriptionsSpec.url_of("es_test_projection_state"))
+      state_db.exec %(CREATE SCHEMA "eventstore")
+      elsewhere = ES::SubscriptionStoreAdapters::Postgres.new(state_db)
+      elsewhere.same_database?(store).should be_false
+      ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionsSpec.db).same_database?(store).should be_true
+      # Stores of the other kind than the events
+      ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionsSpec.db).same_database?(ES::EventStoreAdapters::InMemory.new).should be_false
+      ES::SubscriptionStoreAdapters::InMemory.new.same_database?(store).should be_false
+
+      reacting = ES::Subscriptions.new(
+        bus: PostgresSubscriptionsSpec.bus(store, SubPgShipOrder), event_store: store,
+        event_handlers: PostgresSubscriptionsSpec.handlers, projection_database: PostgresSubscriptionsSpec.db, store: elsewhere,
+      )
+      expect_raises(ES::Exception::InvalidState, /only projections can/) { reacting.start }
+      expect_raises(ES::Exception::InvalidState, /only projections can/) { reacting.catch_up }
+
+      # Projections only: it runs, but leaves the reactors' state alone, which
+      # is next to the events
+      projecting = ES::Subscriptions.new(
+        bus: PostgresSubscriptionsSpec.bus(store, SubPgShipOrder, SubPgOrdersAtomic), event_store: store,
+        event_handlers: PostgresSubscriptionsSpec.handlers, projection_database: PostgresSubscriptionsSpec.db,
+        store: ES::SubscriptionStoreAdapters::Postgres.new(state_db), kinds: :projections,
+      )
+      projecting.start
+      state_db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscriptions" WHERE name LIKE 'reactor:%'), as: Int32).should eq(0)
+      state_db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscriptions" WHERE name = 'projection:SubPgOrdersAtomic'), as: Int32).should eq(1)
+      expect_raises(ES::Exception::InvalidState, /is a reactor/) { projecting.pause(SubPgShipOrder) }
+      expect_raises(ES::Exception::InvalidState, /is a reactor/) { projecting.reset(SubPgShipOrder, to: :now) }
+    ensure
+      projecting.try(&.stop)
+      state_db.try(&.close)
+      PostgresSubscriptionsSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_projection_state" WITH (FORCE))
     end
 
     it "runs reactors and projections in separate instances, a reactor awaiting the projection" do

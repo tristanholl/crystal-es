@@ -87,6 +87,29 @@ ES::Subscriptions.new                       # both, the default (ES::Subscriptio
 - **`catch_up`** processes only the subscriptions of the instance's kinds.
 - **Upgrade every instance first.** Instances of crystal-es 0.12.1 or earlier record no kinds and count every instance as one that processes everything. Run split instances only once all of them are on 0.12.2 or later. A custom `ES::SubscriptionStore` needs `heartbeat(instance_id, ttl, kinds)` for split instances; without it, an instance with fewer kinds refuses to start.
 
+### Projections' state next to their database
+
+The projections' subscription state can live next to their tables, in the projection database, instead of next to the events. Then several projection databases can be filled with the same projections from one event store, each a copy of its own: instances share the projections out by name, and only with the instances that keep their state in the same database. An instance that runs both kinds runs two `ES::Subscriptions`:
+
+```crystal
+# Reactors: their appends commit together with their position, so their
+# state must be next to the events
+reactors = ES::Subscriptions.new(kinds: :reactors, listen_url: events_url)
+
+# Projections: their state next to their tables, still woken by the events
+projections = ES::Subscriptions.new(
+  kinds: :projections,
+  store: ES::SubscriptionStoreAdapters::Postgres.new(projection_db, listen_url: events_url),
+)
+```
+
+- **The state's schema is named `eventstore`**, in whichever database the store has. Create it first: the store's `setup` creates its tables, not the schema.
+- **`listen_url` names the events' database**, wherever the state is. That's where the notifications come from. A store whose own database has no events table installs the trigger there, unless it exists already, and `setup` fails if that database has no events table either.
+- **`await` works across both:** it reads a projection's position from the projection database, which is where an atomic projection keeps it anyway.
+- **Only projections:** a reactor's state must stay next to the events, because its appends and its position commit in one transaction of the event store. `start` and `catch_up` refuse reactors with a store elsewhere (`SubscriptionStore#same_database?`), and such an instance refuses `pause`, `resume`, `skip_failed_event` and `reset` for a reactor: run them on an instance whose store is next to the events.
+- **New reactors get their starting position from instances whose store is next to the events,** not from one with its store elsewhere. Start them no later than whatever appends events, or a new reactor misses the events appended in between.
+- **One state database per projection database.** Locks are per database, so instances keeping their state in two places would both process the same projection. Atomic projections still apply each batch once, but the instances contend. Before moving where a projection database's state lives, stop every instance that projects into it.
+
 ## Operations
 
 ```crystal
@@ -102,7 +125,7 @@ subscriptions.reset(OnOrderPlaced, to: :now) # or :beginning to run a reactor ov
 
 Options of `ES::Subscriptions.new`: `poll_interval` (1 second: how often to look for new events when not woken), `rebalance_interval` (5 seconds), `max_attempts` (10), `retry_base_delay` (1 second), `retry_max_delay` (5 minutes) and `kinds` (both; see [separate instances](#reactors-and-projections-in-separate-instances)).
 
-`listen_url` makes an instance wake up the moment events are appended (Postgres LISTEN/NOTIFY, needs `require "pg"`). Without it, new events are picked up at the next poll. Listening has a cost for every writer of the store: it installs a trigger that sends a notification from each append transaction, and Postgres commits transactions that sent a notification one at a time. Use it where latency matters more than append throughput. Once no instance listens any more, drop the trigger with `DROP TRIGGER notify_subscriptions ON eventstore.events`.
+`listen_url` makes an instance wake up the moment events are appended (Postgres LISTEN/NOTIFY, needs `require "pg"`). It names the database the events are in, even when the subscription state is elsewhere (see [the projections' state next to their database](#projections-state-next-to-their-database)). Without it, new events are picked up at the next poll. Listening has a cost for every writer of the store: it installs a trigger that sends a notification from each append transaction, and Postgres commits transactions that sent a notification one at a time. Use it where latency matters more than append throughput. Once no instance listens any more, drop the trigger with `DROP TRIGGER notify_subscriptions ON eventstore.events`.
 
 ## Specs and scripts
 

@@ -401,6 +401,20 @@ describe ES::Subscriptions do
       projecting.try(&.stop)
     end
 
+    it "runs reactors with any in-memory store: its state lives in the process" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      separate = ES::SubscriptionStoreAdapters::InMemory.new
+      separate.same_database?(store).should be_true
+
+      reacting = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers, subscription_store: separate)
+      reacting.start
+      store.append(placed(1))
+      eventually { SubShipOrder.seen == [1] }
+    ensure
+      reacting.try(&.stop)
+    end
+
     it "refuses no kinds at all" do
       store = ES::EventStoreAdapters::InMemory.new
       handlers = sub_handlers

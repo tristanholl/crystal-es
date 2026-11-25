@@ -137,6 +137,7 @@ module ES
     end
 
     @settings = {} of Handler => Settings
+    @store_elsewhere : Bool? = nil
     @units : Array(Unit)? = nil
     @started = false
     @caught_up = false
@@ -322,12 +323,14 @@ module ES
 
     # Stops processing a handler, on whichever instance holds it, until `resume`
     def pause(handler : Handler) : Nil
+      refuse_reactor_elsewhere!(handler)
       units_for(handler).each { |unit| @store.update_status(unit.name, ES::SubscriptionStore::PAUSED) }
       refresh(handler)
     end
 
     # Resumes a paused or failing handler, with its attempts reset
     def resume(handler : Handler) : Nil
+      refuse_reactor_elsewhere!(handler)
       units_for(handler).each { |unit| @store.update_status(unit.name, ES::SubscriptionStore::RUNNING) }
       refresh(handler)
     end
@@ -335,6 +338,7 @@ module ES
     # Moves a failing or paused handler past the event it failed on and
     # resumes it. The handler never processes that event; logged as a warning.
     def skip_failed_event(handler : Handler) : Nil
+      refuse_reactor_elsewhere!(handler)
       units_for(handler).each do |unit|
         failed = @store.fetch(unit.name).try(&.failed_position)
         next if failed.nil?
@@ -374,6 +378,7 @@ module ES
     def reset(reactor : ES::Reactor.class, to : Symbol) : Nil
       raise ES::Exception::InvalidState.new("to must be :beginning or :now, got #{to}") unless to.in?(:beginning, :now)
 
+      refuse_reactor_elsewhere!(reactor)
       position = to == :beginning ? LogPosition::ZERO : @event_store.log_head
       units_for(reactor).each { |unit| @store.reset(unit.name, position) }
       refresh(reactor)
@@ -412,14 +417,15 @@ module ES
     end
 
     # Creates what the subscriptions need and gives new ones their starting
-    # position. Every instance does so for every reactor, so a new reactor
-    # starts when the first instance of the release does, not when one that
-    # runs reactors comes up later. A projection gets its position on an
-    # instance that processes projections, where it is checked against its
-    # table.
+    # position. Every instance whose store is next to the events does so for
+    # every reactor, so a new reactor starts when the first such instance of
+    # the release does, not when one that runs reactors comes up later. A
+    # projection gets its position on an instance that processes projections,
+    # where it is checked against its table.
     private def prepare : Nil
+      refuse_reactors_elsewhere!
       setup
-      units.select { |unit| unit.reactor? || processes?(unit) }.group_by(&.handler).each { |handler, handler_units| create_positions(handler, handler_units) }
+      units.select { |unit| (unit.reactor? && !store_elsewhere?) || processes?(unit) }.group_by(&.handler).each { |handler, handler_units| create_positions(handler, handler_units) }
     end
 
     # Processes one subscription up to the head; true if it moved
@@ -455,6 +461,33 @@ module ES
 
     private def units : Array(Unit)
       @units ||= build_units
+    end
+
+    # A reactor's position moves in the event store's transaction, in the
+    # subscriptions table of the event store's database. A store elsewhere
+    # would read one row and move another, and retry for good.
+    private def refuse_reactors_elsewhere! : Nil
+      return unless own_units.any?(&.reactor?)
+      return unless store_elsewhere?
+
+      raise ES::Exception::InvalidState.new("The subscription store keeps its state in another database than the events, which only projections can: pass kinds: :projections")
+    end
+
+    # A reactor's state on such an instance is not where its position is
+    # read and moved, so operations on it would act on the wrong rows
+    private def refuse_reactor_elsewhere!(handler : Handler) : Nil
+      return unless handler.is_a?(ES::Reactor.class) && store_elsewhere?
+
+      raise ES::Exception::InvalidState.new("'#{handler.name}' is a reactor, whose state is next to the events, not in this instance's subscription store: use an instance whose store is there")
+    end
+
+    # Whether the store keeps its state in another database than the events.
+    # Asked once: the answer doesn't change while the instance runs.
+    private def store_elsewhere? : Bool
+      elsewhere = @store_elsewhere
+      return elsewhere unless elsewhere.nil?
+
+      @store_elsewhere = @store.same_database?(@event_store) == false
     end
 
     # The subscriptions of the kinds this instance processes

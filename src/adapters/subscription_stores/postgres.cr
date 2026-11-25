@@ -13,13 +13,19 @@ module ES
     # `pool_mode = transaction`). An instance that dies loses its connection,
     # and Postgres releases its locks with it.
     #
+    # The state may also live in another database than the events, e.g. next
+    # to the projections that a set of subscriptions fills. The schema is
+    # still named `eventstore` there.
+    #
     # With `listen_url`, the store LISTENs for the notification a trigger on
     # the events table sends on every append, and wakes subscriptions at once
     # instead of at their next poll. This needs crystal-pg (`require "pg"`).
-    # The trigger is only installed by a `setup` that listens: Postgres
-    # commits transactions that sent a notification one at a time, so it
-    # costs every writer of the store some append throughput. Without it,
-    # subscriptions pick new events up at their next poll.
+    # `listen_url` names the database the events are in, which is where the
+    # notifications come from, whichever database the state is in. The
+    # trigger is only installed by a `setup` that listens, in that database:
+    # Postgres commits transactions that sent a notification one at a time,
+    # so it costs every writer of the store some append throughput. Without
+    # it, subscriptions pick new events up at their next poll.
     class Postgres < ES::SubscriptionStore
       # The channel the events trigger notifies
       NOTIFY_CHANNEL = "crystal_es_events"
@@ -77,8 +83,10 @@ module ES
       @locks_lost = false
       @wakeups = Channel(Nil).new(1)
       @stop_listening : Proc(Nil)? = nil
+      @listen_url : String? = nil
 
       def initialize(@db : DB::Database, listen_url : String? = nil)
+        @listen_url = listen_url
         listen(listen_url) if listen_url
       end
 
@@ -86,7 +94,15 @@ module ES
       # Idempotent; the event store must be set up first. Drop the trigger
       # (`DROP TRIGGER notify_subscriptions ON eventstore.events`) once no
       # instance listens any more.
+      #
+      # The trigger goes where the events are. A store next to them installs
+      # it in the same transaction as its tables. A store in another database
+      # installs it in the database of `listen_url`, in a transaction of its
+      # own, and runs no DDL there if the trigger exists already. Without an
+      # events table there, it fails like a store whose own database lacks
+      # them: the store would listen for notifications that never come.
       def setup : Nil
+        events_elsewhere = false
         @db.transaction do |tx|
           connection = tx.connection
           # Concurrent DDL on the same objects fails, so setups take turns
@@ -95,16 +111,18 @@ module ES
           connection.exec INSTANCES_TABLE
           connection.exec %(GRANT SELECT ON "eventstore"."subscriptions", "eventstore"."subscription_instances" TO pg_monitor)
           if @stop_listening
-            connection.exec NOTIFY_FUNCTION
-            trigger = connection.query_one(%(SELECT EXISTS (SELECT FROM pg_trigger WHERE tgname = 'notify_subscriptions' AND tgrelid = '"eventstore"."events"'::regclass)), as: Bool)
-            # Only when missing: creating it locks the events table against appends
-            connection.exec NOTIFY_TRIGGER unless trigger
+            if connection.query_one(%(SELECT to_regclass('"eventstore"."events"') IS NOT NULL), as: Bool)
+              install_trigger(connection)
+            else
+              events_elsewhere = true
+            end
           end
           kinds = connection.query_one(%(SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'eventstore' AND table_name = 'subscription_instances' AND column_name = 'kinds')), as: Bool)
           # Only when missing, and last: altering the table locks out every
           # instance's heartbeat until the transaction commits
           connection.exec INSTANCES_KINDS_COLUMN unless kinds
         end
+        @listen_url.try { |url| install_trigger_elsewhere(url) } if events_elsewhere
       end
 
       def fetch(name : String) : State?
@@ -237,6 +255,26 @@ module ES
         @db.exec(%(DELETE FROM "eventstore"."subscription_instances" WHERE heartbeat_at < now() - make_interval(secs => $1)), seconds * 10)
       end
 
+      # The same database however each connection reaches it: its name and
+      # oid, and when the server started, as a number so that no session
+      # setting (time zone, date style) changes it
+      private DATABASE_IDENTITY = %(SELECT current_database() || ':' || (SELECT oid FROM pg_database WHERE datname = current_database())::text || ':' || extract(epoch FROM pg_postmaster_start_time())::text)
+
+      def same_database?(event_store : ES::EventStore) : Bool?
+        # An in-memory event store has no database to share
+        return false if event_store.is_a?(ES::EventStoreAdapters::InMemory) || event_store.is_a?(ES::EventStoreAdapters::InMemory::Bound)
+
+        postgres = event_store.as?(ES::EventStoreAdapters::Postgres)
+        return unless postgres
+
+        theirs = postgres.transaction do |bound|
+          bound.as?(ES::EventStoreAdapters::Postgres::Bound).try(&.connection.query_one(DATABASE_IDENTITY, as: String))
+        end
+        return unless theirs
+
+        @db.query_one(DATABASE_IDENTITY, as: String) == theirs
+      end
+
       def leave(instance_id : String) : Nil
         @db.exec(%(DELETE FROM "eventstore"."subscription_instances" WHERE instance_id = $1), instance_id)
       end
@@ -297,6 +335,36 @@ module ES
         end
         @lock_connection = nil
         @locks_lost = true
+      end
+
+      private def install_trigger(connection : DB::Connection) : Nil
+        connection.exec NOTIFY_FUNCTION
+        # Only when missing: creating it locks the events table against appends
+        connection.exec NOTIFY_TRIGGER unless trigger?(connection)
+      end
+
+      # Fails, like a store next to the events would, if the database has no
+      # events table: the `regclass` cast raises
+      private def trigger?(connection : DB::Connection) : Bool
+        connection.query_one(%(SELECT EXISTS (SELECT FROM pg_trigger WHERE tgname = 'notify_subscriptions' AND tgrelid = '"eventstore"."events"'::regclass)), as: Bool)
+      end
+
+      # For a store whose state is in another database than the events: in
+      # the database of `listen_url`. Runs no DDL there when the trigger exists
+      # already, so a role that may only listen needs no more once it does.
+      private def install_trigger_elsewhere(url : String) : Nil
+        events_database = DB.open(url)
+        begin
+          events_database.transaction do |tx|
+            connection = tx.connection
+            next if trigger?(connection)
+
+            connection.exec %(SELECT pg_advisory_xact_lock($1)), SETUP_LOCK
+            install_trigger(connection)
+          end
+        ensure
+          events_database.close
+        end
       end
 
       private def listen(url : String) : Nil
