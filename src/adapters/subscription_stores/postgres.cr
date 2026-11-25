@@ -1,6 +1,7 @@
 module ES
   module SubscriptionStoreAdapters
-    # Subscription state in the event store's database, schema `eventstore`:
+    # Subscription state in the event store's database, schema `eventstore`
+    # unless another is given (see `new`):
     #
     # - `subscriptions`: position and status per subscription
     # - `subscription_instances`: a heartbeat per running instance, with the
@@ -13,9 +14,11 @@ module ES
     # `pool_mode = transaction`). An instance that dies loses its connection,
     # and Postgres releases its locks with it.
     #
-    # The state may also live in another database than the events, e.g. next
-    # to the projections that a set of subscriptions fills. The schema is
-    # still named `eventstore` there.
+    # The state may also live in another database than the events, or another
+    # schema (`schema:`), e.g. next to the projections that a set of
+    # subscriptions fills. Reactors keep theirs in `eventstore` next to the
+    # events: their position moves in the event store's transaction, in its
+    # subscriptions table.
     #
     # With `listen_url`, the store LISTENs for the notification a trigger on
     # the events table sends on every append, and wakes subscriptions at once
@@ -37,31 +40,37 @@ module ES
       # application's own advisory locks by accident
       private LOCK_PREFIX = "crystal-es:subscription:"
 
-      private SUBSCRIPTIONS_TABLE = <<-SQL
-        CREATE TABLE IF NOT EXISTS "eventstore"."subscriptions" (
-          "name" TEXT PRIMARY KEY,
-          "position_transaction_id" BIGINT NOT NULL,
-          "position_id" BIGINT NOT NULL,
-          "status" TEXT NOT NULL DEFAULT 'running',
-          "attempts" INTEGER NOT NULL DEFAULT 0,
-          "last_error" TEXT,
-          "failed_transaction_id" BIGINT,
-          "failed_id" BIGINT,
-          "updated_at" TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-        SQL
+      private def subscriptions_table_ddl : String
+        <<-SQL
+          CREATE TABLE IF NOT EXISTS #{@subscriptions} (
+            "name" TEXT PRIMARY KEY,
+            "position_transaction_id" BIGINT NOT NULL,
+            "position_id" BIGINT NOT NULL,
+            "status" TEXT NOT NULL DEFAULT 'running',
+            "attempts" INTEGER NOT NULL DEFAULT 0,
+            "last_error" TEXT,
+            "failed_transaction_id" BIGINT,
+            "failed_id" BIGINT,
+            "updated_at" TIMESTAMPTZ NOT NULL DEFAULT now()
+          )
+          SQL
+      end
 
-      private INSTANCES_TABLE = <<-SQL
-        CREATE TABLE IF NOT EXISTS "eventstore"."subscription_instances" (
-          "instance_id" TEXT PRIMARY KEY,
-          "heartbeat_at" TIMESTAMPTZ NOT NULL,
-          "kinds" TEXT[]
-        )
-        SQL
+      private def instances_table_ddl : String
+        <<-SQL
+          CREATE TABLE IF NOT EXISTS #{@instances} (
+            "instance_id" TEXT PRIMARY KEY,
+            "heartbeat_at" TIMESTAMPTZ NOT NULL,
+            "kinds" TEXT[]
+          )
+          SQL
+      end
 
       # Added in 0.12.2. Instances of earlier versions write no kinds, which
       # counts for every kind.
-      private INSTANCES_KINDS_COLUMN = %(ALTER TABLE "eventstore"."subscription_instances" ADD COLUMN "kinds" TEXT[])
+      private def instances_kinds_column_ddl : String
+        %(ALTER TABLE #{@instances} ADD COLUMN "kinds" TEXT[])
+      end
 
       private NOTIFY_FUNCTION = <<-SQL
         CREATE OR REPLACE FUNCTION "eventstore"."notify_subscriptions"() RETURNS trigger AS $$
@@ -84,8 +93,27 @@ module ES
       @wakeups = Channel(Nil).new(1)
       @stop_listening : Proc(Nil)? = nil
       @listen_url : String? = nil
+      @schema : String
+      @subscriptions_name : String
+      @instances_name : String
+      @subscriptions : String
+      @instances : String
 
-      def initialize(@db : DB::Database, listen_url : String? = nil)
+      # `schema` is where the store keeps its tables, `eventstore` unless
+      # given: e.g. `projections`, next to the projections whose state it
+      # keeps, in a database without the events. In another schema than
+      # `eventstore` the tables are named `_crystal_es_subscriptions` and
+      # `_crystal_es_subscription_instances`, like the projection checkpoints,
+      # so they can't collide with an application's own tables.
+      def initialize(@db : DB::Database, listen_url : String? = nil, schema : String = "eventstore")
+        raise ES::Exception::InvalidState.new("schema must be a plain lower-case identifier, got '#{schema}'") unless schema.matches?(/\A[a-z_][a-z0-9_]*\z/)
+
+        @schema = schema
+        prefix = schema == "eventstore" ? "" : "_crystal_es_"
+        @subscriptions_name = "#{prefix}subscriptions"
+        @instances_name = "#{prefix}subscription_instances"
+        @subscriptions = %("#{schema}"."#{@subscriptions_name}")
+        @instances = %("#{schema}"."#{@instances_name}")
         @listen_url = listen_url
         listen(listen_url) if listen_url
       end
@@ -107,9 +135,10 @@ module ES
           connection = tx.connection
           # Concurrent DDL on the same objects fails, so setups take turns
           connection.exec %(SELECT pg_advisory_xact_lock($1)), SETUP_LOCK
-          connection.exec SUBSCRIPTIONS_TABLE
-          connection.exec INSTANCES_TABLE
-          connection.exec %(GRANT SELECT ON "eventstore"."subscriptions", "eventstore"."subscription_instances" TO pg_monitor)
+          connection.exec %(CREATE SCHEMA IF NOT EXISTS "#{@schema}") unless @schema == "eventstore"
+          connection.exec subscriptions_table_ddl
+          connection.exec instances_table_ddl
+          connection.exec %(GRANT SELECT ON #{@subscriptions}, #{@instances} TO pg_monitor)
           if @stop_listening
             if connection.query_one(%(SELECT to_regclass('"eventstore"."events"') IS NOT NULL), as: Bool)
               install_trigger(connection)
@@ -117,25 +146,25 @@ module ES
               events_elsewhere = true
             end
           end
-          kinds = connection.query_one(%(SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'eventstore' AND table_name = 'subscription_instances' AND column_name = 'kinds')), as: Bool)
+          kinds = connection.query_one(%(SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 AND column_name = 'kinds')), @schema, @instances_name, as: Bool)
           # Only when missing, and last: altering the table locks out every
           # instance's heartbeat until the transaction commits
-          connection.exec INSTANCES_KINDS_COLUMN unless kinds
+          connection.exec instances_kinds_column_ddl unless kinds
         end
         @listen_url.try { |url| install_trigger_elsewhere(url) } if events_elsewhere
       end
 
       def fetch(name : String) : State?
-        states(%(SELECT #{STATE_COLUMNS} FROM "eventstore"."subscriptions" WHERE name = $1), [name] of DB::Any).first?
+        states(%(SELECT #{STATE_COLUMNS} FROM #{@subscriptions} WHERE name = $1), [name] of DB::Any).first?
       end
 
       def all : Array(State)
-        states(%(SELECT #{STATE_COLUMNS} FROM "eventstore"."subscriptions" ORDER BY name), [] of DB::Any)
+        states(%(SELECT #{STATE_COLUMNS} FROM #{@subscriptions} ORDER BY name), [] of DB::Any)
       end
 
       def create(name : String, position : ES::EventStore::LogPosition) : Nil
         @db.exec(
-          %(INSERT INTO "eventstore"."subscriptions" (name, position_transaction_id, position_id) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING),
+          %(INSERT INTO #{@subscriptions} (name, position_transaction_id, position_id) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING),
           name, position.transaction_id, position.id
         )
       end
@@ -154,30 +183,30 @@ module ES
 
       def record_position(name : String, position : ES::EventStore::LogPosition) : Nil
         @db.exec(
-          %(INSERT INTO "eventstore"."subscriptions" (name, position_transaction_id, position_id) VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET position_transaction_id = EXCLUDED.position_transaction_id, position_id = EXCLUDED.position_id, updated_at = now()),
+          %(INSERT INTO #{@subscriptions} (name, position_transaction_id, position_id) VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET position_transaction_id = EXCLUDED.position_transaction_id, position_id = EXCLUDED.position_id, updated_at = now()),
           name, position.transaction_id, position.id
         )
       end
 
       def reset(name : String, position : ES::EventStore::LogPosition) : Nil
         @db.exec(
-          %(INSERT INTO "eventstore"."subscriptions" (name, position_transaction_id, position_id) VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET position_transaction_id = EXCLUDED.position_transaction_id, position_id = EXCLUDED.position_id, status = 'running', attempts = 0, last_error = NULL, failed_transaction_id = NULL, failed_id = NULL, updated_at = now()),
+          %(INSERT INTO #{@subscriptions} (name, position_transaction_id, position_id) VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET position_transaction_id = EXCLUDED.position_transaction_id, position_id = EXCLUDED.position_id, status = 'running', attempts = 0, last_error = NULL, failed_transaction_id = NULL, failed_id = NULL, updated_at = now()),
           name, position.transaction_id, position.id
         )
       end
 
       def record_failure(name : String, attempts : Int32, message : String, failed_position : ES::EventStore::LogPosition, status : String) : Nil
         @db.exec(
-          %(UPDATE "eventstore"."subscriptions" SET status = $2, attempts = $3, last_error = $4, failed_transaction_id = $5, failed_id = $6, updated_at = now() WHERE name = $1),
+          %(UPDATE #{@subscriptions} SET status = $2, attempts = $3, last_error = $4, failed_transaction_id = $5, failed_id = $6, updated_at = now() WHERE name = $1),
           name, status, attempts, message, failed_position.transaction_id, failed_position.id
         )
       end
 
       def update_status(name : String, status : String) : Nil
         if status == RUNNING
-          @db.exec(%(UPDATE "eventstore"."subscriptions" SET status = $2, attempts = 0, last_error = NULL, failed_transaction_id = NULL, failed_id = NULL, updated_at = now() WHERE name = $1), name, status)
+          @db.exec(%(UPDATE #{@subscriptions} SET status = $2, attempts = 0, last_error = NULL, failed_transaction_id = NULL, failed_id = NULL, updated_at = now() WHERE name = $1), name, status)
         else
-          @db.exec(%(UPDATE "eventstore"."subscriptions" SET status = $2, updated_at = now() WHERE name = $1), name, status)
+          @db.exec(%(UPDATE #{@subscriptions} SET status = $2, updated_at = now() WHERE name = $1), name, status)
         end
       end
 
@@ -223,11 +252,11 @@ module ES
       def heartbeat(instance_id : String, ttl : Time::Span) : Int32
         seconds = ttl.total_seconds
         @db.exec(
-          %(INSERT INTO "eventstore"."subscription_instances" (instance_id, heartbeat_at) VALUES ($1, now()) ON CONFLICT (instance_id) DO UPDATE SET heartbeat_at = now()),
+          %(INSERT INTO #{@instances} (instance_id, heartbeat_at) VALUES ($1, now()) ON CONFLICT (instance_id) DO UPDATE SET heartbeat_at = now()),
           instance_id
         )
         forget_dead_instances(seconds)
-        @db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscription_instances" WHERE heartbeat_at >= now() - make_interval(secs => $1)), seconds, as: Int32)
+        @db.query_one(%(SELECT count(*)::int FROM #{@instances} WHERE heartbeat_at >= now() - make_interval(secs => $1)), seconds, as: Int32)
       end
 
       # Kinds travel as one comma-separated parameter, so they must be plain
@@ -239,20 +268,20 @@ module ES
         seconds = ttl.total_seconds
         list = kinds.join(',')
         @db.exec(
-          %(INSERT INTO "eventstore"."subscription_instances" (instance_id, heartbeat_at, kinds) VALUES ($1, now(), string_to_array($2, ',')) ON CONFLICT (instance_id) DO UPDATE SET heartbeat_at = now(), kinds = EXCLUDED.kinds),
+          %(INSERT INTO #{@instances} (instance_id, heartbeat_at, kinds) VALUES ($1, now(), string_to_array($2, ',')) ON CONFLICT (instance_id) DO UPDATE SET heartbeat_at = now(), kinds = EXCLUDED.kinds),
           instance_id, list
         )
         forget_dead_instances(seconds)
 
         @db.query_all(
-          %(SELECT array_to_string(kinds, ',') FROM "eventstore"."subscription_instances" WHERE heartbeat_at >= now() - make_interval(secs => $1)),
+          %(SELECT array_to_string(kinds, ',') FROM #{@instances} WHERE heartbeat_at >= now() - make_interval(secs => $1)),
           seconds, as: String?
         ).map { |row| row.try(&.split(',')) }
       end
 
       # Instances that died without leaving
       private def forget_dead_instances(seconds : Float64) : Nil
-        @db.exec(%(DELETE FROM "eventstore"."subscription_instances" WHERE heartbeat_at < now() - make_interval(secs => $1)), seconds * 10)
+        @db.exec(%(DELETE FROM #{@instances} WHERE heartbeat_at < now() - make_interval(secs => $1)), seconds * 10)
       end
 
       # The same database however each connection reaches it: its name and
@@ -260,9 +289,13 @@ module ES
       # setting (time zone, date style) changes it
       private DATABASE_IDENTITY = %(SELECT current_database() || ':' || (SELECT oid FROM pg_database WHERE datname = current_database())::text || ':' || extract(epoch FROM pg_postmaster_start_time())::text)
 
+      # Only a store in the `eventstore` schema counts as next to the events:
+      # one in another schema keeps a reactor's position where the reactor
+      # doesn't read it from, even in the events' database
       def same_database?(event_store : ES::EventStore) : Bool?
         # An in-memory event store has no database to share
         return false if event_store.is_a?(ES::EventStoreAdapters::InMemory) || event_store.is_a?(ES::EventStoreAdapters::InMemory::Bound)
+        return false unless @schema == "eventstore"
 
         postgres = event_store.as?(ES::EventStoreAdapters::Postgres)
         return unless postgres
@@ -276,7 +309,7 @@ module ES
       end
 
       def leave(instance_id : String) : Nil
-        @db.exec(%(DELETE FROM "eventstore"."subscription_instances" WHERE instance_id = $1), instance_id)
+        @db.exec(%(DELETE FROM #{@instances} WHERE instance_id = $1), instance_id)
       end
 
       def wait_for_appends(timeout : Time::Span) : Nil
@@ -316,7 +349,7 @@ module ES
 
       private def move(connection : DB::Database | DB::Connection, name : String, expected : ES::EventStore::LogPosition, position : ES::EventStore::LogPosition) : Bool
         result = connection.exec(
-          %(UPDATE "eventstore"."subscriptions" SET position_transaction_id = $4, position_id = $5, updated_at = now() WHERE name = $1 AND position_transaction_id = $2 AND position_id = $3),
+          %(UPDATE #{@subscriptions} SET position_transaction_id = $4, position_id = $5, updated_at = now() WHERE name = $1 AND position_transaction_id = $2 AND position_id = $3),
           name, expected.transaction_id, expected.id, position.transaction_id, position.id
         )
         result.rows_affected == 1

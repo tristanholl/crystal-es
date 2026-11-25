@@ -316,7 +316,12 @@ module ES
         state = states[unit.name]?
         next if state.nil?
 
-        position = unit.checkpoints.try(&.fetch(unit.name)) || state.position
+        # A projection's position is its checkpoint only, as for `await`
+        position = if checkpoints = unit.checkpoints
+                     checkpoints.fetch(unit.name) || LogPosition::ZERO
+                   else
+                     state.position
+                   end
         Status.new(unit.name, unit.handler.name, unit.partition, unit.partitions, state.status, position, head, state.attempts, state.last_error, unit.owned?, reached?(unit, position, head))
       end
     end
@@ -470,7 +475,7 @@ module ES
       return unless own_units.any?(&.reactor?)
       return unless store_elsewhere?
 
-      raise ES::Exception::InvalidState.new("The subscription store keeps its state in another database than the events, which only projections can: pass kinds: :projections")
+      raise ES::Exception::InvalidState.new("The subscription store keeps its state elsewhere than next to the events (another database or schema), which only projections can: pass kinds: :projections")
     end
 
     # A reactor's state on such an instance is not where its position is
@@ -816,7 +821,15 @@ module ES
     # its data
     private def load(unit : Unit) : ES::SubscriptionStore::State
       state = @store.fetch(unit.name) || raise ES::Exception::InvalidState.new("Subscription '#{unit.name}' has no position")
-      position = unit.checkpoints.try(&.fetch(unit.name)) || state.position
+      position = if checkpoints = unit.checkpoints
+                   # Created by `prepare` for every projection processed; gone
+                   # only if the checkpoints table was emptied meanwhile.
+                   # Neither the store's row (stale then) nor the beginning
+                   # (rows may be there) is safe to go on from.
+                   checkpoints.fetch(unit.name) || raise ES::Exception::InvalidState.new("Subscription '#{unit.name}' has no checkpoint: restart the instance, so it is created")
+                 else
+                   state.position
+                 end
       unit.position = unit.saved = position
       unit.saved_at = Time.utc
       state
@@ -1008,8 +1021,15 @@ module ES
 
     # Whether a subscription has processed everything up to `position`: its
     # saved position is past it, or no event it handles lies in between
+    # A projection's position is its checkpoint, next to its rows, and only
+    # that: a projection without one (new, or rebuilt) hasn't reached
+    # anything, whatever a store elsewhere still says about it
     private def reached?(unit : Unit, position : LogPosition) : Bool
-      saved = unit.checkpoints.try(&.fetch(unit.name)) || @store.fetch(unit.name).try(&.position) || LogPosition::ZERO
+      saved = if checkpoints = unit.checkpoints
+                checkpoints.fetch(unit.name) || LogPosition::ZERO
+              else
+                @store.fetch(unit.name).try(&.position) || LogPosition::ZERO
+              end
       reached?(unit, saved, position)
     end
 

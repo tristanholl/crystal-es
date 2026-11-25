@@ -187,6 +187,38 @@ describe ES::SubscriptionStoreAdapters::Postgres do
       {events.as(ES::EventStore), store.as(ES::SubscriptionStore)}
     end
 
+    describe "in a schema of its own" do
+      store_scenarios do
+        events, _ = PostgresSubscriptionStoreSpec.fresh
+        PostgresSubscriptionStoreSpec.db.exec %(DROP SCHEMA IF EXISTS "subs_state" CASCADE)
+        store = ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionStoreSpec.db, schema: "subs_state")
+        store.setup
+        {events.as(ES::EventStore), store.as(ES::SubscriptionStore)}
+      end
+
+      it "keeps its tables there, prefixed so they can't collide with an application's" do
+        PostgresSubscriptionStoreSpec.fresh
+        PostgresSubscriptionStoreSpec.db.exec %(DROP SCHEMA IF EXISTS "subs_state" CASCADE)
+        store = ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionStoreSpec.db, schema: "subs_state")
+        store.setup
+        tables = PostgresSubscriptionStoreSpec.db.query_all(%(SELECT table_name::text FROM information_schema.tables WHERE table_schema = 'subs_state' ORDER BY table_name), as: String)
+        tables.should eq(["_crystal_es_subscription_instances", "_crystal_es_subscriptions"])
+        store.close
+      end
+
+      it "counts as elsewhere than next to the events, even in their database" do
+        events, _ = PostgresSubscriptionStoreSpec.fresh
+        ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionStoreSpec.db, schema: "subs_state").same_database?(events).should be_false
+        ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionStoreSpec.db).same_database?(events).should be_true
+      end
+
+      it "refuses a schema that isn't a plain identifier" do
+        expect_raises(ES::Exception::InvalidState, /plain lower-case identifier/) do
+          ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionStoreSpec.db, schema: %(x"; DROP TABLE y; --))
+        end
+      end
+    end
+
     it "installs the notification trigger only for a store that listens" do
       _, store = PostgresSubscriptionStoreSpec.fresh
       trigger = -> { PostgresSubscriptionStoreSpec.db.query_one(%(SELECT EXISTS (SELECT FROM pg_trigger WHERE tgname = 'notify_subscriptions')), as: Bool) }

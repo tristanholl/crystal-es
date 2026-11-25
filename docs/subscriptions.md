@@ -99,11 +99,11 @@ reactors = ES::Subscriptions.new(kinds: :reactors, listen_url: events_url)
 # Projections: their state next to their tables, still woken by the events
 projections = ES::Subscriptions.new(
   kinds: :projections,
-  store: ES::SubscriptionStoreAdapters::Postgres.new(projection_db, listen_url: events_url),
+  store: ES::SubscriptionStoreAdapters::Postgres.new(projection_db, listen_url: events_url, schema: "projections"),
 )
 ```
 
-- **The state's schema is named `eventstore`**, in whichever database the store has. Create it first: the store's `setup` creates its tables, not the schema.
+- **`schema:` puts the state next to the projections**, e.g. in their schema `projections`, so their database needs nothing else. A store outside `eventstore` counts as elsewhere, even in the events' database, so it runs projections only. `setup` creates the schema if needed. Outside `eventstore` the tables are named `_crystal_es_subscriptions` and `_crystal_es_subscription_instances`, like the projection checkpoints next to them, so they can't collide with an application's tables. Without `schema:` the state goes into a schema named `eventstore`, in whichever database the store has; create it there yourself, as `setup` creates only a schema other than `eventstore`.
 - **`listen_url` names the events' database**, wherever the state is. That's where the notifications come from. A store whose own database has no events table installs the trigger there, unless it exists already, and `setup` fails if that database has no events table either.
 - **`await` works across both:** it reads a projection's position from the projection database, which is where an atomic projection keeps it anyway.
 - **Only projections:** a reactor's state must stay next to the events, because its appends and its position commit in one transaction of the event store. `start` and `catch_up` refuse reactors with a store elsewhere (`SubscriptionStore#same_database?`), and such an instance refuses `pause`, `resume`, `skip_failed_event` and `reset` for a reactor: run them on an instance whose store is next to the events.
@@ -161,7 +161,7 @@ With the in-memory event store, specs need no database: every `ES::Subscriptions
 - **Long transactions delay delivery.** The oldest writing transaction anywhere in the Postgres cluster holds the head back until it ends: a session idle in a transaction, a forgotten prepared transaction, a long migration in another database. Nothing is lost, but nothing is delivered past it either. Set `idle_in_transaction_session_timeout`, and monitor the age of the oldest transaction (`age(backend_xid)` in `pg_stat_activity`, and `pg_prepared_xacts`).
 - **Positions are transaction ids of the cluster.** Moving the store to another cluster with `pg_dump` or logical replication can bring transaction ids the new cluster hasn't reached yet. Reading the log then raises until the new cluster's transaction counter is past the highest stored `transaction_id`. `pg_upgrade` and physical replicas keep the counter and are not affected.
 - **An event whose key is missing is skipped.** As in `read` and replays, an event whose encryption key can't be found counts as erased: subscriptions log a warning and move past it. The key store raises the same error for a destroyed key and for one that never existed, so an instance started against the wrong or an empty key store skips every encrypted event. Check the key store configuration before starting subscriptions.
-- **`last_error` stores the exception class and the first line of the message** of a failing handler in `eventstore.subscriptions`, which `pg_monitor` can read. Later lines, where Postgres puts row values, are dropped. Don't put personal data in the first line of your own exceptions.
+- **`last_error` stores the exception class and the first line of the message** of a failing handler in the store's subscriptions table (`eventstore.subscriptions`, or `_crystal_es_subscriptions` in another schema), which `pg_monitor` can read. Later lines, where Postgres puts row values, are dropped. Don't put personal data in the first line of your own exceptions.
 - The in-memory event store implements all of this in the process, for specs. Every `ES::Subscriptions` on the same in-memory store shares its state, like instances sharing a database.
 
 ## Moving from the queue
