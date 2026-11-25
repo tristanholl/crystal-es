@@ -133,7 +133,7 @@ module PostgresSubscriptionsSpec
   def self.projections_elsewhere(store : ES::EventStore, bus, state_db : DB::Database) : ES::Subscriptions
     ES::Subscriptions.new(
       bus: bus, event_store: store, event_handlers: handlers, projection_database: db,
-      store: ES::SubscriptionStoreAdapters::Postgres.new(state_db, listen_url: URL),
+      store: ES::SubscriptionStoreAdapters::Postgres.new(state_db, listen_url: URL, schema: "subs_projections"),
       poll_interval: 30.seconds, rebalance_interval: 30.seconds,
       max_attempts: 2, retry_base_delay: 1.millisecond, retry_max_delay: 5.milliseconds,
       kinds: :projections,
@@ -330,7 +330,6 @@ describe "ES::Subscriptions on Postgres" do
       PostgresSubscriptionsSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_projection_state" WITH (FORCE))
       PostgresSubscriptionsSpec.db.exec %(CREATE DATABASE "es_test_projection_state")
       state_db = DB.open(PostgresSubscriptionsSpec.url_of("es_test_projection_state"))
-      state_db.exec %(CREATE SCHEMA "eventstore")
       bus = PostgresSubscriptionsSpec.bus(store, SubPgShipOrder, SubPgOrdersAtomic)
       # One instance running both kinds: reactors with their state next to
       # the events (their appends commit with their position), projections
@@ -347,13 +346,30 @@ describe "ES::Subscriptions on Postgres" do
       PostgresSubscriptionsSpec.numbers("orders_atomic").should eq([1, 2, 3])
       PostgresSubscriptionsSpec.eventually { SubPgShipOrder.seen.size >= 3 }
 
-      state_db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscriptions" WHERE name = 'projection:SubPgOrdersAtomic'), as: Int32).should eq(1)
+      # Next to the projections, in their schema; no eventstore schema there
+      state_db.query_one(%(SELECT count(*)::int FROM "subs_projections"."_crystal_es_subscriptions" WHERE name = 'projection:SubPgOrdersAtomic'), as: Int32).should eq(1)
+      state_db.query_one(%(SELECT to_regnamespace('eventstore') IS NULL), as: Bool).should be_true
       PostgresSubscriptionsSpec.db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscriptions" WHERE name = 'projection:SubPgOrdersAtomic'), as: Int32).should eq(0)
     ensure
       reacting.try(&.stop)
       projecting.try(&.stop)
       state_db.try(&.close)
       PostgresSubscriptionsSpec.db.exec %(DROP DATABASE IF EXISTS "es_test_projection_state" WITH (FORCE))
+    end
+
+    it "waits for a projection by its checkpoint only, not by a position a store still has for it" do
+      store = PostgresSubscriptionsSpec.fresh
+      (1..3).each { |number| store.append(PostgresSubscriptionsSpec.placed(number)) }
+      # A position left in the reactors' store, e.g. from before the
+      # projections kept their state next to their rows
+      ES::SubscriptionStoreAdapters::Postgres.new(PostgresSubscriptionsSpec.db).tap(&.setup).create("projection:SubPgOrdersAtomic", store.log_head)
+
+      reacting = PostgresSubscriptionsSpec.subscriptions(store, PostgresSubscriptionsSpec.bus(store, SubPgShipOrder, SubPgOrdersAtomic), kinds: :reactors)
+      reacting.start
+      # No checkpoint: the projection, rebuilt or new, hasn't reached anything
+      reacting.await(SubPgOrdersAtomic, store.log_head, timeout: 200.milliseconds).should be_false
+    ensure
+      reacting.try(&.stop)
     end
 
     it "refuses reactors with a store in another database than the events" do

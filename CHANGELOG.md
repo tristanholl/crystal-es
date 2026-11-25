@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.12.4
+
+### Added
+
+- **`ES::SubscriptionStoreAdapters::Postgres.new(db, schema:)`** keeps the subscription state in another schema than `eventstore`, e.g. next to the projections whose state it keeps, in their schema. A projection database then needs no `eventstore` schema of its own.
+  - `setup` creates the schema if needed.
+  - Outside `eventstore` the tables are named `_crystal_es_subscriptions` and `_crystal_es_subscription_instances`, like the projection checkpoints, so they can't collide with an application's tables.
+  - The default stays `eventstore`, with the tables named as before.
+  - A store outside `eventstore` counts as elsewhere than next to the events (`same_database?` is false), even in the events' database. So it runs projections only, like a store in another database: a reactor's position moves in the event store's transaction, in `eventstore.subscriptions`.
+
+### Fixed
+
+- **A projection's position is its checkpoint only.** Before, a projection whose checkpoint was missing fell back to whatever position the instance's store still had for it, e.g. a row left over in `eventstore.subscriptions`.
+  - `await`: a projection without a checkpoint, new or rebuilt with its checkpoint, has reached nothing. Before, a reactor could go ahead against a read model that was only partly replayed.
+  - `status`: such a projection is at the beginning, not caught up.
+  - **Processing** a projection whose checkpoint row disappeared meanwhile (the checkpoints table emptied) raises. The instance logs an error and retries until it is restarted, which creates the checkpoint again. Before, it went on from the store's row.
+
+### Upgrading from 0.12.3
+
+- No changes needed.
+- **Moving projections' state to another schema:** stop every instance first and move them in one deploy. Locks are keyed by name, so instances on both sides would contend, while each counts only its own side's instances.
+  - Every projection carries on from its checkpoint, which is next to its rows, atomic or not.
+  - Its status (paused, failing) starts over.
+  - Delete the old rows once no instance uses them.
+
 ## 0.12.3
 
 ### Added
