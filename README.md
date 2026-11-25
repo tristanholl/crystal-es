@@ -18,7 +18,7 @@ An event sourcing library for Crystal
 
 ## Overview
 
-`crystal-es` is an event sourcing foundation for Crystal applications. It is optimized for PostgreSQL as event store, queue, and projection database, and was originally extracted from an open-source core-banking project.
+`crystal-es` is an event sourcing foundation for Crystal applications. It is optimized for PostgreSQL as event store and projection database, and was originally extracted from an open-source core-banking project.
 
 The library provides:
 - **Aggregates** — reconstruct domain state by replaying events
@@ -30,7 +30,7 @@ The library provides:
 - **Event Bus** — fan-out published events to reactors and projections
 - **Subscriptions** — deliver events to reactors and projections exactly once and in order, across any number of application instances, on Postgres alone (see [Subscriptions](docs/subscriptions.md))
 - **Dynamic consistency boundaries** — tag events, read them by type and tag, and append on the condition that none of the tags a decision depended on moved (see [Tags](docs/events.md#tags), [Querying by tag](docs/consistency.md#querying-by-tag), [Tag versions and conditional appends](docs/consistency.md#tag-versions-and-conditional-appends) and [Decision projections](docs/consistency.md#decision-projections))
-- **Adapters** — PostgreSQL and in-memory implementations for event stores and queues
+- **Adapters** — PostgreSQL and in-memory implementations for event stores, key stores and subscription stores
 
 A complete working example lives in [`./examples/financial-transaction`](./examples/financial-transaction). [`./examples/course-subscription`](./examples/course-subscription) shows dynamic consistency boundaries: course capacity and a per-student limit enforced together, unique hashed emails, and erasure.
 
@@ -48,7 +48,7 @@ See the [changelog](./CHANGELOG.md) for upgrade notes between versions.
 | [Event store](docs/event-store.md) | Adapters, transactions, reading the store as a log |
 | [Dynamic consistency boundaries](docs/consistency.md) | Querying by tag, tag versions, conditional appends, decision projections |
 | [Payload encryption](docs/encryption.md) | Encrypted bodies, erasure by key destruction, what is and isn't protected |
-| [Configuration](docs/configuration.md) | `ES::Config` and the queue |
+| [Configuration](docs/configuration.md) | `ES::Config`, and the deprecated queue |
 | [Recommended project structure](docs/recommended-project-structure.md) | Organizing an application by domain: folders, naming, boundaries between domains, wiring, specs |
 
 ---

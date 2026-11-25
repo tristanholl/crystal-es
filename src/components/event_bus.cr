@@ -10,6 +10,10 @@ module ES
     end
 
     # TODO: Currently blocking, might be a candidate for async processing
+    # Runs every handler subscribed to the event's class, in the calling fiber,
+    # one after another. Nothing is saved and nothing retried. To deliver the
+    # events of an event store, use `ES::Subscriptions`, which reads the
+    # routing from this bus; in specs, `ES::Subscriptions#catch_up`.
     def publish(event : ES::Event) : Bool
       return true if !@subscriptions.has_key?(event.class) # TODO: Check if exception is more reasonable
 

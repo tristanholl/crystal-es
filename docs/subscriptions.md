@@ -88,6 +88,26 @@ Options of `ES::Subscriptions.new`: `poll_interval` (1 second: how often to look
 
 `listen_url` makes an instance wake up the moment events are appended (Postgres LISTEN/NOTIFY, needs `require "pg"`). Without it, new events are picked up at the next poll. Listening has a cost for every writer of the store: it installs a trigger that sends a notification from each append transaction, and Postgres commits transactions that sent a notification one at a time. Use it where latency matters more than append throughput. Once no instance listens any more, drop the trigger with `DROP TRIGGER notify_subscriptions ON eventstore.events`.
 
+## Specs and scripts
+
+`catch_up` runs the subscriptions in the calling fiber instead of in the background, until they have processed everything appended so far, then returns. That includes the events the reactors append on the way, and the handlers those reach in turn. Use it in specs and one-off scripts, in place of `start` and `await`:
+
+```crystal
+subscriptions = ES::Subscriptions.new
+subscriptions.catch_up                         # gives new subscriptions their position: reactors start at the head
+event_store.append(OrderPlaced.new(...))
+subscriptions.catch_up                         # OnOrderPlaced has run, and OrdersProjection holds the order
+```
+
+- **The guarantees are the same as under `start`.** Each event is processed in the same transaction as the move of the position, and what was processed is saved. Calling `catch_up` again goes on from there.
+- **A failing handler's error is raised from `catch_up`**, not retried. The failed event or batch is rolled back, and the next `catch_up` tries it again. The error is raised in full, unlike under `start`, which logs and stores only its first line: a database error can carry row values, decrypted body data included, in its later lines. In a script against real data, rescue it and log only the class and first line.
+- **Paused subscriptions are left alone.**
+- **It refuses** a subscription another instance is processing, and can't be combined with `start` on the same `ES::Subscriptions`.
+- **It raises after `timeout`** (30 seconds) if the subscriptions haven't caught up by then, for example because a reactor keeps appending events that reach it again.
+- **`stop` releases its database session** once you're done.
+
+With the in-memory event store, specs need no database: every `ES::Subscriptions` on the same store shares its state.
+
 ## How it works
 
 - **Reading the store as a log.** `EventStore#read_log` returns events in the order of the transactions that appended them, and only up to `log_head`: the newest position before the oldest transaction still running (`pg_snapshot_xmin`). Event positions alone are taken at insert, not at commit, so a reader resuming after the last position it saw could skip an event that committed late. Reading up to the head never does. This is what `setup` adds the `transaction_id xid8` column and the `events_log_position_idx` index for.
@@ -107,7 +127,7 @@ Options of `ES::Subscriptions.new`: `poll_interval` (1 second: how often to look
 
 ## Moving from the queue
 
-The [queue](configuration.md#queue) and `EventBus#publish` keep working. Subscriptions replace them for delivering events:
+The [queue](configuration.md#queue) and a consumer calling `EventBus#publish` keep working, but the queue is deprecated as the way to deliver events and will be removed in a later release. Subscriptions replace it:
 
 1. **Projections one at a time, no downtime.** Unsubscribe the projection from the queue consumer's bus and empty its table: the subscription fills it from the beginning. Or keep its rows and `configure(..., start: :now)` when no event can be in flight. Remove `init: true`.
 2. **Reactors together, in a short write pause.** Stop accepting commands for a moment, let the queue drain, start the subscriptions (reactors start `:now`), then accept commands again. Without a pause, an event appended during the switch could reach a reactor twice, or not at all.

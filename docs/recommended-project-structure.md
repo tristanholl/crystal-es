@@ -69,4 +69,4 @@ Keep the wiring out of the domains, so you can read it in one go:
 
 ## Specs
 
-Mirror `src/domains/` under `spec/domains/`, and run the domain specs against the in-memory event store, key store and queue: they implement the same semantics as Postgres. Test a command handler by appending its preconditions as events, calling `handle`, and asserting on the events it appended. Keep a smaller set of specs against Postgres for the wiring: setup, projections and subscriptions.
+Mirror `src/domains/` under `spec/domains/`, and run the domain specs against the in-memory event store and key store: they implement the same semantics as Postgres. Test a command handler by appending its preconditions as events, calling `handle`, and asserting on the events it appended. Test reactors and projections through the wiring: append events, call `ES::Subscriptions#catch_up`, and assert on what the handlers did (see [Specs and scripts](subscriptions.md#specs-and-scripts)). Keep a smaller set of specs against Postgres for the wiring: setup, projections and subscriptions.
