@@ -117,13 +117,21 @@ private def sub_bus(store : ES::EventStore, handlers : ES::EventHandlers, *react
   bus
 end
 
-private def subscriptions(store : ES::EventStore, bus, handlers, instance = UUID.v7.to_s) : ES::Subscriptions
+private def subscriptions(store : ES::EventStore, bus, handlers, instance = UUID.v7.to_s, kinds : ES::Subscriptions::Kinds = ES::Subscriptions::Kinds::All, subscription_store : ES::SubscriptionStore? = nil) : ES::Subscriptions
   ES::Subscriptions.new(
     bus: bus, event_store: store, event_handlers: handlers, projection_database: nil,
+    store: subscription_store,
     poll_interval: 5.milliseconds, rebalance_interval: 30.milliseconds,
     max_attempts: 3, retry_base_delay: 1.millisecond, retry_max_delay: 5.milliseconds,
-    instance_id: instance,
+    instance_id: instance, kinds: kinds,
   )
+end
+
+# A subscription store written for a version without kinds
+class SubStoreWithoutKinds < ES::SubscriptionStoreAdapters::InMemory
+  def heartbeat(instance_id : String, ttl : Time::Span, kinds : Array(String)) : Array(Array(String)?)
+    raise ES::Exception::NotImplemented.new("no kinds")
+  end
 end
 
 # Polls until the block is truthy, failing after `timeout`
@@ -303,6 +311,115 @@ describe ES::Subscriptions do
   ensure
     first.try(&.stop)
     second.try(&.stop)
+  end
+
+  describe "kinds" do
+    it "shares each kind out only among the instances that process it" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      reactors = {SubCounter1, SubCounter2, SubCounter3, SubCounter4}
+      reacting = subscriptions(store, sub_bus(store, handlers, *reactors), handlers, kinds: :reactors)
+      projecting = subscriptions(store, sub_bus(store, handlers, *reactors), handlers, kinds: :projections)
+      reacting.start
+      projecting.start
+
+      eventually { reacting.status.count(&.owned?) == 4 }
+      # Several rebalances, in which the instance running projections must
+      # neither take a reactor nor make the other give one up
+      sleep 150.milliseconds
+      reacting.status.count(&.owned?).should eq(4)
+      projecting.status.count(&.owned?).should eq(0)
+
+      (1..5).each { |number| store.append(placed(number)) }
+      {% for index in 1..4 %}
+        eventually { SubCounter{{ index }}.seen.size >= 5 }
+        SubCounter{{ index }}.seen.should eq((1..5).to_a)
+      {% end %}
+    ensure
+      reacting.try(&.stop)
+      projecting.try(&.stop)
+    end
+
+    it "shares reactors between an instance running everything and one running reactors" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      reactors = {SubCounter1, SubCounter2, SubCounter3, SubCounter4}
+      full = subscriptions(store, sub_bus(store, handlers, *reactors), handlers)
+      reacting = subscriptions(store, sub_bus(store, handlers, *reactors), handlers, kinds: :reactors)
+      full.start
+      reacting.start
+
+      eventually { full.status.count(&.owned?) == 2 && reacting.status.count(&.owned?) == 2 }
+      (full.status.select(&.owned?).map(&.name) & reacting.status.select(&.owned?).map(&.name)).should be_empty
+    ensure
+      full.try(&.stop)
+      reacting.try(&.stop)
+    end
+
+    it "awaits a handler that another instance processes" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      reacting = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers, kinds: :reactors)
+      projecting = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers, kinds: :projections)
+      projecting.start
+      reacting.start
+
+      store.append(placed(1))
+      projecting.await(SubShipOrder, store.log_head, timeout: 2.seconds).should be_true
+      SubShipOrder.seen.should eq([1])
+    ensure
+      reacting.try(&.stop)
+      projecting.try(&.stop)
+    end
+
+    it "starts a new reactor when the first instance starts, even one that doesn't run reactors" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      projecting = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers, kinds: :projections)
+      store.append(placed(1))
+      projecting.start
+      store.append(placed(2))
+
+      reacting = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers, kinds: :reactors)
+      reacting.start
+      eventually { SubShipOrder.seen == [2] }
+    ensure
+      projecting.try(&.stop)
+      reacting.try(&.stop)
+    end
+
+    it "catches up only the subscriptions of its kinds" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      projecting = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers, kinds: :projections).configure(SubShipOrder, start: :beginning)
+      store.append(placed(1))
+
+      projecting.catch_up
+      SubShipOrder.seen.should be_empty
+      projecting.status.map(&.owned?).should eq([false])
+    ensure
+      projecting.try(&.stop)
+    end
+
+    it "refuses no kinds at all" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+
+      expect_raises(ES::Exception::InvalidState, /kinds/) { subscriptions(store, sub_bus(store, handlers, SubCounter1), handlers, kinds: ES::Subscriptions::Kinds::None) }
+    end
+
+    it "runs every kind on a store that can't tell kinds apart, and refuses fewer" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      full = subscriptions(store, sub_bus(store, handlers, SubCounter1), handlers, subscription_store: SubStoreWithoutKinds.new)
+      full.start
+      eventually { full.status.count(&.owned?) == 1 }
+
+      reacting = subscriptions(store, sub_bus(store, handlers, SubCounter1), handlers, kinds: :reactors, subscription_store: SubStoreWithoutKinds.new)
+      expect_raises(ES::Exception::NotImplemented, /no kinds/) { reacting.start }
+    ensure
+      full.try(&.stop)
+    end
   end
 
   it "partitions a handler by aggregate, keeping every aggregate's events in order" do

@@ -118,12 +118,13 @@ module PostgresSubscriptionsSpec
     bus
   end
 
-  def self.subscriptions(store : ES::EventStore, bus, listen = false) : ES::Subscriptions
+  def self.subscriptions(store : ES::EventStore, bus, listen = false, kinds : ES::Subscriptions::Kinds = ES::Subscriptions::Kinds::All) : ES::Subscriptions
     ES::Subscriptions.new(
       bus: bus, event_store: store, event_handlers: handlers, projection_database: db,
       listen_url: listen ? URL : nil,
       poll_interval: 20.milliseconds, rebalance_interval: 100.milliseconds,
       max_attempts: 2, retry_base_delay: 1.millisecond, retry_max_delay: 5.milliseconds,
+      kinds: kinds,
     )
   end
 
@@ -303,6 +304,28 @@ describe "ES::Subscriptions on Postgres" do
     ensure
       first.try(&.stop)
       second.try(&.stop)
+    end
+
+    it "runs reactors and projections in separate instances, a reactor awaiting the projection" do
+      store = PostgresSubscriptionsSpec.fresh
+      reacting = PostgresSubscriptionsSpec.subscriptions(store, PostgresSubscriptionsSpec.bus(store, SubPgShipOrder, SubPgOrdersAtomic), kinds: :reactors)
+      projecting = PostgresSubscriptionsSpec.subscriptions(store, PostgresSubscriptionsSpec.bus(store, SubPgShipOrder, SubPgOrdersAtomic), kinds: :projections)
+      reacting.start
+      projecting.start
+      PostgresSubscriptionsSpec.eventually { reacting.status.count(&.owned?) == 1 && projecting.status.count(&.owned?) == 1 }
+      reacting.status.find!(&.owned?).name.should eq("reactor:SubPgShipOrder")
+      projecting.status.find!(&.owned?).name.should eq("projection:SubPgOrdersAtomic")
+
+      (1..5).each { |number| store.append(PostgresSubscriptionsSpec.placed(number)) }
+      # The instance running reactors reads the projection's position from
+      # its database, although it doesn't run it
+      reacting.await(SubPgOrdersAtomic, store.log_head, timeout: 5.seconds).should be_true
+      PostgresSubscriptionsSpec.numbers("orders_atomic").should eq((1..5).to_a)
+      PostgresSubscriptionsSpec.eventually { SubPgShipOrder.seen.size >= 5 }
+      SubPgShipOrder.seen.sort.should eq((1..5).to_a)
+    ensure
+      reacting.try(&.stop)
+      projecting.try(&.stop)
     end
   else
     pending "runs the subscription scenarios against Postgres (set ES_TEST_DATABASE_URL)", tags: "db" do

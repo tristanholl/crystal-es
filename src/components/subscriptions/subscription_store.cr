@@ -93,6 +93,19 @@ module ES
     # alive, itself included: those that recorded a heartbeat within `ttl`
     abstract def heartbeat(instance_id : String, ttl : Time::Span) : Int32
 
+    # Records that the instance is alive and processes subscriptions of the
+    # given kinds (`reactor`, `projection`), and returns the kinds of every
+    # instance alive, itself included. Nil stands for an instance that
+    # recorded its heartbeat without kinds, which processes every kind. Lets
+    # instances that run only reactors or only projections share each kind
+    # out among themselves.
+    #
+    # Not abstract, so stores written for earlier versions keep compiling;
+    # without it, every instance must process every kind.
+    def heartbeat(instance_id : String, ttl : Time::Span, kinds : Array(String)) : Array(Array(String)?)
+      raise ES::Exception::NotImplemented.new("#{self.class.name} can't record which kinds of subscription an instance processes, so every instance must process all of them")
+    end
+
     # Removes an instance that stops
     abstract def leave(instance_id : String) : Nil
 

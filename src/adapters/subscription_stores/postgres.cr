@@ -3,8 +3,9 @@ module ES
     # Subscription state in the event store's database, schema `eventstore`:
     #
     # - `subscriptions`: position and status per subscription
-    # - `subscription_instances`: a heartbeat per running instance, so they can
-    #   share the subscriptions out evenly
+    # - `subscription_instances`: a heartbeat per running instance, with the
+    #   kinds of subscription it processes, so they can share the
+    #   subscriptions out evenly
     #
     # Locks are session advisory locks, held on one connection taken out of
     # the pool for as long as the store lives. They need a session-mode
@@ -47,9 +48,14 @@ module ES
       private INSTANCES_TABLE = <<-SQL
         CREATE TABLE IF NOT EXISTS "eventstore"."subscription_instances" (
           "instance_id" TEXT PRIMARY KEY,
-          "heartbeat_at" TIMESTAMPTZ NOT NULL
+          "heartbeat_at" TIMESTAMPTZ NOT NULL,
+          "kinds" TEXT[]
         )
         SQL
+
+      # Added in 0.12.2. Instances of earlier versions write no kinds, which
+      # counts for every kind.
+      private INSTANCES_KINDS_COLUMN = %(ALTER TABLE "eventstore"."subscription_instances" ADD COLUMN "kinds" TEXT[])
 
       private NOTIFY_FUNCTION = <<-SQL
         CREATE OR REPLACE FUNCTION "eventstore"."notify_subscriptions"() RETURNS trigger AS $$
@@ -94,6 +100,10 @@ module ES
             # Only when missing: creating it locks the events table against appends
             connection.exec NOTIFY_TRIGGER unless trigger
           end
+          kinds = connection.query_one(%(SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'eventstore' AND table_name = 'subscription_instances' AND column_name = 'kinds')), as: Bool)
+          # Only when missing, and last: altering the table locks out every
+          # instance's heartbeat until the transaction commits
+          connection.exec INSTANCES_KINDS_COLUMN unless kinds
         end
       end
 
@@ -198,9 +208,33 @@ module ES
           %(INSERT INTO "eventstore"."subscription_instances" (instance_id, heartbeat_at) VALUES ($1, now()) ON CONFLICT (instance_id) DO UPDATE SET heartbeat_at = now()),
           instance_id
         )
-        # Instances that died without leaving
-        @db.exec(%(DELETE FROM "eventstore"."subscription_instances" WHERE heartbeat_at < now() - make_interval(secs => $1)), seconds * 10)
+        forget_dead_instances(seconds)
         @db.query_one(%(SELECT count(*)::int FROM "eventstore"."subscription_instances" WHERE heartbeat_at >= now() - make_interval(secs => $1)), seconds, as: Int32)
+      end
+
+      # Kinds travel as one comma-separated parameter, so they must be plain
+      # words. NULL kinds, written by instances of earlier versions, count for
+      # every kind.
+      def heartbeat(instance_id : String, ttl : Time::Span, kinds : Array(String)) : Array(Array(String)?)
+        raise ES::Exception::InvalidState.new("kinds must be plain lower-case words, got #{kinds}") if kinds.empty? || !kinds.all?(&.matches?(/\A[a-z_]+\z/))
+
+        seconds = ttl.total_seconds
+        list = kinds.join(',')
+        @db.exec(
+          %(INSERT INTO "eventstore"."subscription_instances" (instance_id, heartbeat_at, kinds) VALUES ($1, now(), string_to_array($2, ',')) ON CONFLICT (instance_id) DO UPDATE SET heartbeat_at = now(), kinds = EXCLUDED.kinds),
+          instance_id, list
+        )
+        forget_dead_instances(seconds)
+
+        @db.query_all(
+          %(SELECT array_to_string(kinds, ',') FROM "eventstore"."subscription_instances" WHERE heartbeat_at >= now() - make_interval(secs => $1)),
+          seconds, as: String?
+        ).map { |row| row.try(&.split(',')) }
+      end
+
+      # Instances that died without leaving
+      private def forget_dead_instances(seconds : Float64) : Nil
+        @db.exec(%(DELETE FROM "eventstore"."subscription_instances" WHERE heartbeat_at < now() - make_interval(secs => $1)), seconds * 10)
       end
 
       def leave(instance_id : String) : Nil

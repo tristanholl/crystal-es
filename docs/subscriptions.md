@@ -71,6 +71,22 @@ An `atomic: true` projection must write *only* through `write`: rows written on 
 
 `configure(handler, partitions: n)` splits a subscription by aggregate id into `n` subscriptions, so up to `n` instances process that handler at once. Events of one aggregate stay in order. Partitions are fixed once a subscription has a position: changing them in place is refused.
 
+## Reactors and projections in separate instances
+
+By default every instance processes every subscription. `kinds:` lets an instance process only its reactors or only its projections, so the two can be deployed and scaled apart:
+
+```crystal
+ES::Subscriptions.new(kinds: :reactors)     # this instance runs the reactors
+ES::Subscriptions.new(kinds: :projections)  # this one the projections
+ES::Subscriptions.new                       # both, the default (ES::Subscriptions::Kinds::All)
+```
+
+- **Each kind is shared out among the instances that process it.** Instances record their kinds with their heartbeats. A single reactors-only instance takes every reactor, however many instances run projections next to it. When every instance processes every kind, they're shared out together, as before.
+- **Wire the same bus everywhere.** Every handler in the bus stays known to an instance that doesn't process it. `await`, `status`, `pause`, `resume`, `rebuild` and `reset` work for all of them, so a reactor can wait for a projection that another instance runs: `await` reads the projection's position from its database. Every instance gives a new reactor its starting position, so it starts when the first instance of a release does. A new projection gets its position on an instance that runs projections, where it is checked against its table.
+- **Run at least one instance of each kind.** Nothing delivers to a kind no instance processes. Events wait, and a reactor that awaits a projection times out.
+- **`catch_up`** processes only the subscriptions of the instance's kinds.
+- **Upgrade every instance first.** Instances of crystal-es 0.12.1 or earlier record no kinds and count every instance as one that processes everything. Run split instances only once all of them are on 0.12.2 or later. A custom `ES::SubscriptionStore` needs `heartbeat(instance_id, ttl, kinds)` for split instances; without it, an instance with fewer kinds refuses to start.
+
 ## Operations
 
 ```crystal
@@ -84,7 +100,7 @@ subscriptions.reset(OnOrderPlaced, to: :now) # or :beginning to run a reactor ov
 
 `status` reads the shared state, so any instance, or a one-off console, can report on all of them. A pause or reset made on one instance reaches the instance holding the subscription within `rebalance_interval` (5 seconds).
 
-Options of `ES::Subscriptions.new`: `poll_interval` (1 second: how often to look for new events when not woken), `rebalance_interval` (5 seconds), `max_attempts` (10), `retry_base_delay` (1 second) and `retry_max_delay` (5 minutes).
+Options of `ES::Subscriptions.new`: `poll_interval` (1 second: how often to look for new events when not woken), `rebalance_interval` (5 seconds), `max_attempts` (10), `retry_base_delay` (1 second), `retry_max_delay` (5 minutes) and `kinds` (both; see [separate instances](#reactors-and-projections-in-separate-instances)).
 
 `listen_url` makes an instance wake up the moment events are appended (Postgres LISTEN/NOTIFY, needs `require "pg"`). Without it, new events are picked up at the next poll. Listening has a cost for every writer of the store: it installs a trigger that sends a notification from each append transaction, and Postgres commits transactions that sent a notification one at a time. Use it where latency matters more than append throughput. Once no instance listens any more, drop the trigger with `DROP TRIGGER notify_subscriptions ON eventstore.events`.
 
@@ -111,7 +127,7 @@ With the in-memory event store, specs need no database: every `ES::Subscriptions
 ## How it works
 
 - **Reading the store as a log.** `EventStore#read_log` returns events in the order of the transactions that appended them, and only up to `log_head`: the newest position before the oldest transaction still running (`pg_snapshot_xmin`). Event positions alone are taken at insert, not at commit, so a reader resuming after the last position it saw could skip an event that committed late. Reading up to the head never does. This is what `setup` adds the `transaction_id xid8` column and the `events_log_position_idx` index for.
-- **One instance per subscription.** Each instance takes Postgres session advisory locks, one per subscription, on one connection it keeps for that. If an instance dies, its connection goes and its locks with it, and another instance takes over within `rebalance_interval`. Instances record heartbeats in `eventstore.subscription_instances` and each takes `ceil(subscriptions / instances)`, so work spreads as instances come and go.
+- **One instance per subscription.** Each instance takes Postgres session advisory locks, one per subscription, on one connection it keeps for that. If an instance dies, its connection goes and its locks with it, and another instance takes over within `rebalance_interval`. Instances record heartbeats in `eventstore.subscription_instances` and each takes `ceil(subscriptions / instances)`, so work spreads as instances come and go. With [separate instances](#reactors-and-projections-in-separate-instances), it is `ceil(subscriptions of a kind / instances processing it)` per kind.
 - **Positions move by compare-and-set.** A position is only moved from the value the instance last saved. An instance that lost its lock, or a subscription reset meanwhile, finds it moved and rolls its work back instead of applying an event twice.
 - **Waking up.** Every instance polls `log_head` every `poll_interval`. With `listen_url`, a statement trigger on the events table also sends `NOTIFY crystal_es_events`, and listening instances wake at once.
 

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.2
+
+### Added
+
+- **`ES::Subscriptions.new(kinds:)`** lets an instance process only its reactors (`:reactors`) or only its projections (`:projections`), so they can be deployed and scaled apart. The default is both, as before. Instances record their kinds with their heartbeats, and each kind is shared out among the instances that process it. When every instance processes every kind, all subscriptions are shared out together, as before. Every handler in the bus stays known to an instance that doesn't process it, so `await`, `status` and the operations work for all of them; a reactor can await a projection another instance runs. `catch_up` processes only the instance's kinds. See "Reactors and projections in separate instances" in [docs/subscriptions.md](./docs/subscriptions.md#reactors-and-projections-in-separate-instances).
+- **`ES::SubscriptionStore#heartbeat(instance_id, ttl, kinds)`** records an instance's kinds and returns those of every instance alive. Implemented by both adapters. Not abstract: a custom store without it keeps working for instances that process every kind, and an instance with fewer kinds refuses to start on it with `ES::Exception::NotImplemented`.
+
+### Changed
+
+- **The Postgres subscription store's `setup` adds a `kinds text[]` column to `eventstore.subscription_instances`.** Only when missing; the table holds one row per running instance, so the `ALTER TABLE` is quick, but heartbeats wait for it.
+
+### Upgrading from 0.12.1
+
+- **Run `setup`** on the subscription store once, which `ES::Subscriptions#start` does.
+- **Upgrade every instance before splitting kinds.** An instance of 0.12.1 records no kinds, and counts every instance alive as one that processes everything. Next to instances with fewer kinds, it would take less than it must, and some subscriptions would be left without an instance. Instances of 0.12.2 log a warning on every rebalance while that's the case.
+- **A subclass of a bundled subscription store that overrides `heartbeat(instance_id, ttl)`** is no longer called there: `ES::Subscriptions` now calls `heartbeat(instance_id, ttl, kinds)`. Move the override to that method.
+- **Rolling back to 0.12.1** with a stable `instance_id:` (e.g. the host name): 0.12.1 doesn't clear the kinds an instance recorded before. Clear them with `UPDATE "eventstore"."subscription_instances" SET kinds = NULL`, or give the instance a new id. The default ids are new on every start and need nothing.
+
 ## 0.12.1
 
 ### Added
