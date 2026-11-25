@@ -4,6 +4,23 @@ module ES
 
     class_property version : String = "unknown"
 
+    # Yields `ES::Config` to set several values in one place. It only groups
+    # the setters, so order still matters: components read `ES::Config` when
+    # they're created, so set what they read before creating them.
+    #
+    # ```
+    # ES::Config.configure do |config|
+    #   config.event_handlers = ES::EventHandlers.new
+    #   config.encryption = ES::EncryptionKeyManager.new(key_store, application_key)
+    #   config.event_store = ES::EventStoreAdapters::Postgres.new(db)
+    #   config.projection_database = db
+    #   config.event_bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new
+    # end
+    # ```
+    def configure(& : ES::Config.class -> _) : Nil
+      yield self
+    end
+
     def event_bus=(param : ES::EventBus(ES::Reactor.class | ES::Projection.class))
       @@eventbus = param
     end

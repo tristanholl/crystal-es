@@ -1,4 +1,9 @@
 module ES
+  # An outbox for events: the Postgres adapter's `setup` sends the header of
+  # every appended event to a queue, for a consumer to publish on the event bus.
+  #
+  # DEPRECATED: Deliver events with `ES::Subscriptions` instead. The queue
+  # keeps working for now and will be removed in a later release.
   abstract class Queue
     abstract def read(timeout : Time::Span, count : Int32) : Array(ES::Queue::Entry)
     abstract def archive(msg_id : Int64)

@@ -2,8 +2,8 @@
 
 `ES::EventStore` is the persistence layer for events. Two implementations are provided:
 
-- **`ES::Adapters::EventStores::Postgres`** — stores events as JSONB rows with unique `(aggregate_id, version)` constraints. Provides a flattened view for stream queries and cursor-based pagination for batch replay.
-- **`ES::Adapters::EventStores::InMemory`** — lightweight implementation for tests.
+- **`ES::EventStoreAdapters::Postgres`** — stores events as JSONB rows with unique `(aggregate_id, version)` constraints. Provides a flattened view for stream queries and cursor-based pagination for batch replay.
+- **`ES::EventStoreAdapters::InMemory`** — lightweight implementation for tests.
 
 ## Transactions
 

@@ -38,4 +38,6 @@ This wiring is the single place where workflows are defined — one event may fa
 bus.routes # => {OrderPlaced => [OnOrderPlaced, OrdersProjection], ...}
 ```
 
-`publish` runs every subscriber in the calling process, one after another. That is enough for one instance and for specs. To run several instances of an application, deliver events with [Subscriptions](subscriptions.md) instead: the bus wiring stays the single place where routing is defined.
+The bus defines the routing; [Subscriptions](subscriptions.md) deliver the events along it. `ES::Subscriptions` reads `bus.routes` once, when it is configured or started, and turns every handler into a subscription that receives all the events it is subscribed to, in order. So finish the wiring before starting them.
+
+`publish` runs every subscriber of an event at once, in the calling process, one after another, with no saved position and no retries: an exception stops the subscribers after it, and an event published while the process dies reaches no one. Don't use it in production next to subscriptions, or every handler runs twice. It remains handy where none of that matters, such as a quick script. In specs, prefer `ES::Subscriptions#catch_up` (see [Specs and scripts](subscriptions.md#specs-and-scripts)): it delivers what was appended along the same routes, with the guarantees production has, and without a database on the in-memory event store.

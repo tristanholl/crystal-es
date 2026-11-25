@@ -57,6 +57,22 @@ end
   end
 {% end %}
 
+# Records the shipments it saw, one step further down a chain of reactors
+class SubShipmentLog < ES::Reactor
+  class_property seen = [] of Int32
+
+  def call(event : SubOrderShipped)
+    SubShipmentLog.seen << event.body.as(SubOrderShipped::Body).number
+  end
+end
+
+# Reacts to every shipment with another one, without end
+class SubEndlessShipping < ES::Reactor
+  def call(event : SubOrderShipped)
+    @event_store.append(SubOrderShipped.new(actor_id: nil, command_handler: "test", number: 0, aggregate_id: UUID.v7, aggregate_version: 1))
+  end
+end
+
 # Records the version order it saw per aggregate
 class SubOrderLog < ES::Reactor
   class_property seen = {} of String => Array(Int32)
@@ -128,6 +144,7 @@ describe ES::Subscriptions do
     SubShipOrder.seen.clear
     SubShipOrder.failing = nil
     SubOrderLog.seen.clear
+    SubShipmentLog.seen.clear
     {% for index in 1..4 %}
       SubCounter{{ index }}.seen.clear
     {% end %}
@@ -414,5 +431,130 @@ describe ES::Subscriptions do
     expect_raises(ES::Exception::InvalidState, /started already/) { subs.start }
   ensure
     subs.try(&.stop)
+  end
+
+  describe "#catch_up" do
+    it "processes every subscription in the calling fiber, down a chain of reactors" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      # The end of the chain is wired first, so it has its turn before the
+      # shipments it handles are appended
+      bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new(event_store: store, event_handlers: handlers)
+      bus.subscribe(SubOrderShipped, SubShipmentLog)
+      bus.subscribe(SubOrderPlaced, SubShipOrder)
+      subs = subscriptions(store, bus, handlers)
+      subs.catch_up
+
+      store.append(placed(1))
+      store.append(placed(2))
+      subs.catch_up
+
+      SubShipOrder.seen.should eq([1, 2])
+      SubShipmentLog.seen.should eq([1, 2])
+      shipped(store).should eq([1, 2])
+      subs.status.all?(&.caught_up?).should be_true
+
+      subs.catch_up
+      SubShipOrder.seen.should eq([1, 2])
+    end
+
+    it "raises a handler's error, keeps nothing of the failed event, and goes on from there" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      subs = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers)
+      subs.catch_up
+      SubShipOrder.failing = 2
+      (1..3).each { |number| store.append(placed(number)) }
+
+      expect_raises(Exception, /cannot ship order 2/) { subs.catch_up }
+      SubShipOrder.seen.should eq([1])
+      shipped(store).should eq([1])
+
+      SubShipOrder.failing = nil
+      subs.catch_up
+      SubShipOrder.seen.should eq([1, 2, 3])
+      shipped(store).should eq([1, 2, 3])
+    end
+
+    it "leaves a paused subscription alone" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      subs = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers)
+      subs.catch_up
+      subs.pause(SubShipOrder)
+      store.append(placed(1))
+
+      subs.catch_up
+      SubShipOrder.seen.should be_empty
+
+      subs.resume(SubShipOrder)
+      subs.catch_up
+      SubShipOrder.seen.should eq([1])
+    end
+
+    it "saves how far a subscription read past events it doesn't handle" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new(event_store: store, event_handlers: handlers)
+      bus.subscribe(SubOrderShipped, SubShipmentLog)
+      subs = subscriptions(store, bus, handlers)
+      subs.catch_up
+      (1..3).each { |number| store.append(placed(number)) }
+
+      subs.catch_up
+      subs.status.first.position.should eq(store.log_head)
+    end
+
+    it "raises when the reactors don't stop appending events that reach them again" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      bus = ES::EventBus(ES::Reactor.class | ES::Projection.class).new(event_store: store, event_handlers: handlers)
+      bus.subscribe(SubOrderShipped, SubEndlessShipping)
+      subs = subscriptions(store, bus, handlers)
+      subs.configure(SubEndlessShipping, start: :beginning)
+      store.append(SubOrderShipped.new(actor_id: nil, command_handler: "test", number: 0, aggregate_id: UUID.v7, aggregate_version: 1))
+
+      expect_raises(ES::Exception::InvalidState, /did not catch up within/) { subs.catch_up(timeout: 100.milliseconds) }
+    end
+
+    it "refuses a subscription another instance is processing" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      running = subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers)
+      running.start
+
+      expect_raises(ES::Exception::InvalidState, /being processed by another instance/) do
+        subscriptions(store, sub_bus(store, handlers, SubShipOrder), handlers).catch_up
+      end
+    ensure
+      running.try(&.stop)
+    end
+
+    it "leaves subscriptions neither started nor caught up alone on stop" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      subs = subscriptions(store, sub_bus(store, handlers, SubCounter1), handlers)
+      subs.stop
+      subs.start
+    ensure
+      subs.try(&.stop)
+    end
+
+    it "can't be combined with start, nor run after stop" do
+      store = ES::EventStoreAdapters::InMemory.new
+      handlers = sub_handlers
+      started = subscriptions(store, sub_bus(store, handlers, SubCounter1), handlers)
+      started.start
+      expect_raises(ES::Exception::InvalidState, /use await/) { started.catch_up }
+      started.stop
+
+      caught_up = subscriptions(store, sub_bus(store, handlers, SubCounter1), handlers)
+      caught_up.catch_up
+      caught_up.stop
+      expect_raises(ES::Exception::InvalidState, /stopped/) { caught_up.catch_up }
+      expect_raises(ES::Exception::InvalidState, /stopped/) { caught_up.start }
+    ensure
+      started.try(&.stop)
+    end
   end
 end

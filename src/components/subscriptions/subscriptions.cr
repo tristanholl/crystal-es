@@ -14,6 +14,9 @@ module ES
   # subscriptions.stop
   # ```
   #
+  # In specs and one-off scripts, `catch_up` runs them in the calling fiber
+  # instead, until they have processed everything appended so far.
+  #
   # Each delivery happens exactly once, in the order the events were
   # appended:
   #
@@ -123,6 +126,7 @@ module ES
     @settings = {} of Handler => Settings
     @units : Array(Unit)? = nil
     @started = false
+    @caught_up = false
     @stopping = false
     @mutex = Mutex.new
     @store : ES::SubscriptionStore
@@ -200,9 +204,9 @@ module ES
     def start : Nil
       @mutex.synchronize do
         raise ES::Exception::InvalidState.new("Subscriptions were started already") if @started
+        raise ES::Exception::InvalidState.new("Subscriptions were stopped") if @stopping
 
-        setup
-        units.group_by(&.handler).each { |handler, handler_units| create_positions(handler, handler_units) }
+        prepare
         @started = true
       end
 
@@ -213,19 +217,66 @@ module ES
 
     # Stops processing: every subscription finishes the event or batch at
     # hand, then releases its lock for another instance to take over
+    #
+    # After `catch_up`, it releases the database session the subscriptions
+    # took their locks on. On subscriptions neither started nor caught up, it
+    # does nothing.
     def stop : Nil
       @mutex.synchronize do
-        return if !@started || @stopping
+        return if @stopping || !(@started || @caught_up)
         @stopping = true
-        units.select(&.owned?).each { |unit| release(unit) }
+        @units.try(&.select(&.owned?).each { |unit| release(unit) })
       end
 
-      begin
-        @store.leave(@instance_id)
-      rescue ex
-        Log.warn { "Could not deregister instance #{@instance_id}: #{ex.message}" }
+      if @started
+        begin
+          @store.leave(@instance_id)
+        rescue ex
+          Log.warn { "Could not deregister instance #{@instance_id}: #{ex.message}" }
+        end
       end
       @store.close
+    end
+
+    # Processes every subscription in the calling fiber until it has caught up
+    # with the event store, then returns. That includes the events the
+    # reactors append on the way, and the handlers those reach in turn. Use it
+    # in specs and one-off scripts, in place of `start` and `await`: no
+    # background fibers, and the error of a failing handler is raised here
+    # instead of retried. What it processed is saved like under `start`, with
+    # the same guarantees, so calling it again goes on from there.
+    #
+    # ```
+    # subscriptions = ES::Subscriptions.new
+    # event_store.append(OrderPlaced.new(...))
+    # subscriptions.catch_up
+    # # OnOrderPlaced has run, and OrdersProjection holds the order
+    # ```
+    #
+    # The handler's error is raised as it is, unlike the shortened message
+    # `start` logs and stores: a database error may carry row values in its
+    # later lines. In a script against real data, rescue it and log only its
+    # class and first line.
+    #
+    # Paused subscriptions are left alone. It refuses a subscription another
+    # instance is processing, and raises if the subscriptions haven't caught
+    # up within `timeout`, e.g. because a reactor keeps appending events that
+    # reach it again. It can't be combined with `start`.
+    def catch_up(timeout : Time::Span = 30.seconds) : Nil
+      @mutex.synchronize do
+        raise ES::Exception::InvalidState.new("Subscriptions were started: they process events in the background, use await to wait for them") if @started
+        raise ES::Exception::InvalidState.new("Subscriptions were stopped") if @stopping
+
+        prepare
+        @caught_up = true
+        deadline = Time.utc + timeout
+        # Another round as long as one moved: a reactor may have appended
+        # events for a subscription that already had its turn
+        loop do
+          moved = units.map { |unit| catch_up(unit, deadline, timeout) }
+          break unless moved.any?(&.itself)
+        end
+      end
     end
 
     # The state of every subscription, from the shared store
@@ -330,6 +381,39 @@ module ES
       raise ES::Exception::InvalidState.new("'#{event.class.name}' was not delivered by a subscription, so its log position is unknown") if position.nil?
 
       await(handler, position, timeout)
+    end
+
+    # Creates what the subscriptions need and gives new ones their starting
+    # position
+    private def prepare : Nil
+      setup
+      units.group_by(&.handler).each { |handler, handler_units| create_positions(handler, handler_units) }
+    end
+
+    # Processes one subscription up to the head; true if it moved
+    private def catch_up(unit : Unit, deadline : Time, timeout : Time::Span) : Bool
+      raise ES::Exception::InvalidState.new("'#{unit.name}' is being processed by another instance") unless @store.try_lock(unit.name)
+
+      begin
+        state = load(unit)
+        return false if state.paused?
+
+        from = unit.position
+        loop do
+          raise ES::Exception::InvalidState.new("The subscriptions did not catch up within #{timeout}: a reactor may keep appending events that reach it again") if Time.utc >= deadline
+          # The lock went with its session: another instance may process the
+          # subscription now
+          raise ES::Exception::InvalidState.new("Lost the lock of '#{unit.name}' with its database session") unless @store.locks_held?
+          break unless process_page(unit)
+        end
+        skip_to(unit, unit.position, force: true)
+        @store.update_status(unit.name, ES::SubscriptionStore::RUNNING) if state.attempts > 0
+        unit.position != from
+      rescue ex : HandlerFailure
+        raise ex.error
+      ensure
+        @store.unlock(unit.name)
+      end
     end
 
     # Every handler in the bus, in wiring order
@@ -775,13 +859,14 @@ module ES
     end
 
     # Moves past events the subscription doesn't handle. Saved only now and
-    # then: reading them again after a restart costs little, saving them on
-    # every append would cost a write per subscription.
-    private def skip_to(unit : Unit, position : LogPosition) : Nil
-      return unless position > unit.position
+    # then, unless `force`: reading them again after a restart costs little,
+    # saving them on every append would cost a write per subscription.
+    private def skip_to(unit : Unit, position : LogPosition, force : Bool = false) : Nil
+      unit.position = position if position > unit.position
+      return unless unit.position > unit.saved
+      return if !force && Time.utc - unit.saved_at < SKIP_SAVE_INTERVAL
 
-      unit.position = position
-      return if Time.utc - unit.saved_at < SKIP_SAVE_INTERVAL
+      position = unit.position
 
       if checkpoints = unit.checkpoints
         checkpoints.advance(checkpoints.db, unit.name, unit.saved, position)

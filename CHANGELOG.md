@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.1
+
+### Added
+
+- **`ES::Subscriptions#catch_up`** runs the subscriptions in the calling fiber until they have processed everything appended so far, including the events reactors append on the way, then returns. It's meant for specs and one-off scripts, in place of `start` and `await`. The guarantees are the same as under `start`. A failing handler's error is raised from `catch_up` instead of being retried, paused subscriptions are left alone, and it raises after `timeout` (30 seconds) if the reactors keep appending events that reach them again. See "Specs and scripts" in [docs/subscriptions.md](./docs/subscriptions.md#specs-and-scripts).
+- **`ES::Config.configure { |config| ... }`** sets several values in one block. It yields `ES::Config` itself, so the block takes the same setters, and their order still matters. The configuration docs used this form before it existed; see [docs/configuration.md](./docs/configuration.md).
+
+### Deprecated
+
+- **The queue** (`ES::Queue`, `ES::QueueAdapters::Postgres`, `ES::QueueAdapters::InMemory`) is deprecated as the way to deliver events. Subscriptions replace it; see "Moving from the queue" in [docs/subscriptions.md](./docs/subscriptions.md#moving-from-the-queue). It keeps working and raises no warning yet. It will be removed in a later release.
+- `EventBus#publish` is not deprecated, but it's no longer the way to deliver events in production: see [docs/reactors-and-event-bus.md](./docs/reactors-and-event-bus.md#event-bus).
+
+### Changed
+
+- **`ES::Subscriptions#stop`** also releases the database session of subscriptions that were only caught up, never started. Once stopped, they refuse `start` and `catch_up`; create a new `ES::Subscriptions` instead. `stop` on subscriptions neither started nor caught up still does nothing.
+
+### Upgrading from 0.12.0
+
+- No changes needed.
+
 ## 0.12.0
 
 ### Added

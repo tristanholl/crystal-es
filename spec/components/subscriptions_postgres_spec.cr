@@ -186,6 +186,28 @@ describe "ES::Subscriptions on Postgres" do
       subs.try(&.stop)
     end
 
+    it "catches up an atomic projection and a reactor in the calling fiber, then hands their locks on" do
+      store = PostgresSubscriptionsSpec.fresh
+      subs = PostgresSubscriptionsSpec.subscriptions(store, PostgresSubscriptionsSpec.bus(store, SubPgOrdersAtomic, SubPgShipOrder))
+      subs.catch_up
+      (1..3).each { |number| store.append(PostgresSubscriptionsSpec.placed(number)) }
+
+      subs.catch_up
+      PostgresSubscriptionsSpec.numbers("orders_atomic").should eq([1, 2, 3])
+      SubPgShipOrder.seen.should eq([1, 2, 3])
+      ES::ProjectionCheckpoints.new(PostgresSubscriptionsSpec.db, "subs_projections").fetch("projection:SubPgOrdersAtomic").should eq(store.log_head)
+
+      # Every lock was released: another instance processes what follows
+      other = PostgresSubscriptionsSpec.subscriptions(store, PostgresSubscriptionsSpec.bus(store, SubPgOrdersAtomic, SubPgShipOrder))
+      store.append(PostgresSubscriptionsSpec.placed(4))
+      other.catch_up
+      PostgresSubscriptionsSpec.numbers("orders_atomic").should eq([1, 2, 3, 4])
+      SubPgShipOrder.seen.should eq([1, 2, 3, 4])
+    ensure
+      subs.try(&.stop)
+      other.try(&.stop)
+    end
+
     it "skips an event whose key is missing without keeping its half-applied writes" do
       store = PostgresSubscriptionsSpec.fresh
       SubPgOrdersAtomic.missing_key_on = 2
